@@ -53,6 +53,13 @@
                 </ul>
             </div>
         </div>
+
+        <div class="reports-section metric-card" style="margin-top: 20px;">
+            <h2>Daily Reports</h2>
+            <p>Reports are generated daily at 01:05 UTC.</p>
+            <button id="download-btn">Download Latest Report</button>
+            <p id="report-status" style="margin-top: 10px; font-style: italic;"></p>
+        </div>
     </div>
 
 <script>
@@ -102,6 +109,37 @@
         totalCountElem.textContent = 'Error';
         // The browser will automatically try to reconnect
     };
+
+    const downloadBtn = document.getElementById('download-btn');
+    const reportStatus = document.getElementById('report-status');
+
+    downloadBtn.addEventListener('click', async () => {
+        reportStatus.textContent = 'Fetching latest report info...';
+        try {
+            // 1. Ask the API for the name of the latest report
+            const response = await fetch('/reports/latest');
+            const data = await response.json();
+
+            if (data.error) {
+                reportStatus.textContent = data.error;
+                return;
+            }
+            
+            const filename = data.latest_report_filename;
+            reportStatus.textContent = `Downloading ${filename}...`;
+
+            // 2. Trigger the download in the browser
+            window.location.href = `/reports/download/${filename}`;
+            
+            setTimeout(() => {
+                reportStatus.textContent = ''; // Clear status after a few seconds
+            }, 3000);
+
+        } catch (error) {
+            console.error('Failed to download report:', error);
+            reportStatus.textContent = 'Error downloading report. See console for details.';
+        }
+    });
 
 </script>
 </body>
