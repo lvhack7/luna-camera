@@ -56,7 +56,7 @@ def process_camera(camera_id: str, config: dict):
     print(f"[{camera_id}] Connected to Redis at {REDIS_HOST}:{REDIS_PORT}", flush=True)
 
     # 4) Initialize tracker and zones
-    tracker = sv.ByteTrack()
+    tracker = sv.ByteTrack(frame_rate=20)
     zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32)) for z in config["zones"]]
     zone_names = [z["name"] for z in config["zones"]]
     print(f"[{camera_id}] Initialized tracker and {len(zones)} zones.", flush=True)
