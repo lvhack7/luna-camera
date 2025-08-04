@@ -11,19 +11,20 @@ ENV TZ=Etc/UTC
 RUN apt-get update && apt-get install -y \
     python3.10 \
     python3-pip \
+    python3-venv \
     ffmpeg \
     libsm6 \
     libxext6 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
 
 # Copy the dependencies file to the container
-COPY requirements.txt .
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Install any needed packages specified in requirements.txt
-# --no-cache-dir reduces layer size
-RUN pip3 install --no-cache-dir -r requirements.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application's code
 COPY . .
 
 # Command to run the application
