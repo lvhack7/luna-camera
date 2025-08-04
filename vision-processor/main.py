@@ -74,9 +74,7 @@ def process_camera(camera_id: str, config: dict):
             cap.release()
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
             continue
-
-        print(f"[{camera_id}] Processing frame...", flush=True)
-
+        
         # --- Detection ---
         results    = model(frame, conf=CONF_THRESHOLD, classes=[0], device=device)[0]
         detections = sv.Detections.from_ultralytics(results)
