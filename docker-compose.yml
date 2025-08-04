@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # PostgreSQL: Persistent database for historical data and reports
+  db:
+    image: postgres:14-alpine
+    container_name: vision_db
+    restart: always
+    env_file: .env # Loads variables like POSTGRES_USER, etc.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - vision-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis: In-memory broker for high-frequency real-time events
+  redis:
+    image: redis:7-alpine
+    container_name: vision_redis
+    restart: always
+    networks:
+      - vision-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Server: The backend that processes data and serves the frontend
+  api-server:
+    build: ./api-server
+    container_name: vision_api
+    restart: always
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "5501:5501" # Expose API to host machine
+    volumes:
+      - ./api-server/app:/app/app # Mount code for live-reloading in dev
+    networks:
+      - vision-net
+
+  # Vision Processor: The AI service that runs detection and tracking on the GPU
+  vision-processor:
+    build: ./vision-processor
+    container_name: vision
+    restart: always
+    env_file: .env
+    depends_on:
+      - redis
+    volumes:
+      - ./configs:/app/configs:ro # Mount configs as read-only
+    networks:
+      - vision-net
+    deploy: {}
+    # --- GPU ACCELERATION FOR NVIDIA ---
+    # This section is critical for production deployment on a Linux server with an NVIDIA GPU.
+    # It will NOT work on your M2 Mac. The container will fail to start.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all # Use all available GPUs
+    #           capabilities: [gpu]
+
+# Define the shared network for inter-service communication
+networks:
+  vision-net:
+    driver: bridge
+
+# Define the persistent volume for PostgreSQL data
+volumes:
+  postgres_data:

@@ -1,0 +1,52 @@
+{
+  "camera_201": {
+    "rtsp_url_env": "RTSP_URL_201",
+    "resolution_wh": [1920, 1080],
+    "zones": [
+      { "name": "queue", "polygon": [[
+          543.3333333333334,
+          139.99999999999994
+        ],
+        [
+          1067.142857142857,
+          511.42857142857144
+        ],
+        [
+          726.6666666666666,
+          770.952380952381
+        ],
+        [
+          140.95238095238093,
+          449.5238095238095
+        ]] },
+      { "name": "hall1", "polygon": [[633, 870], [1390, 273], [1764, 673]] },
+      { "name": "hall2", "polygon": [[1598, 206], [1703, 99], [1920, 213], [1886, 413]] }
+    ]
+  },
+  "camera_301": {
+    "rtsp_url_env": "RTSP_URL_301",
+    "resolution_wh": [1920, 1080],
+    "zones": [
+      { "name": "hall1", "polygon": [[1226, 863], [1537, 1079], [1919, 565], [1836, 342]] },
+      { "name": "hall1", "polygon": [[1290, 213], [1576, 561], [1805, 349], [1502, 82]] }
+    ]
+  },
+  "camera_501": {
+    "rtsp_url_env": "RTSP_URL_501",
+    "resolution_wh": [1920, 1080],
+    "zones": [
+      { "name": "hall2", "polygon": [[69, 487], [788, 190], [1212, 468], [360, 1066]] }
+    ]
+  },
+  "camera_601": {
+    "rtsp_url_env": "RTSP_URL_601",
+    "resolution_wh": [1920, 1080],
+    "zones": [
+      { "name": "barista", "polygon": [[90, 1], [107, 723], [1686, 723], [1681, 0]] }
+    ],
+    "alert_config": {
+      "alert_zone_name": "barista",
+      "absence_threshold_seconds": 30
+    }
+  }
+}

@@ -1,0 +1,27 @@
+# Use an official Python image that supports ARM64 (for M2 Macs)
+FROM python:3.10-slim
+
+# Set up the working environment
+WORKDIR /app
+
+# Prevent tzdata from prompting during build
+ENV TZ=Etc/UTC
+
+# Install minimal system dependencies needed by OpenCV headless
+# ffmpeg is good for robust video stream handling
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the dependencies file
+COPY requirements.txt .
+
+# Install Python packages. This will automatically fetch the correct
+# versions for the ARM64 architecture, including PyTorch.
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application's code
+COPY . .
+
+# Command to run the application
+CMD ["python3", "main.py"]

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Cafe Analytics</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
+        h1, h2 { color: #444; }
+        .container { max-width: 1200px; margin: auto; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .metric-card { background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 20px; }
+        .metric-card h2 { margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .metric-card ul { list-style-type: none; padding: 0; }
+        .metric-card li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+        .metric-card li:last-child { border-bottom: none; }
+        .metric-card .value { font-weight: bold; font-size: 1.2em; color: #007bff; }
+        #total-occupancy .value { font-size: 2em; color: #dc3545; }
+        .status-dot { height: 12px; width: 12px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 8px; transition: background-color 0.5s ease; }
+        .status-dot.connected { background-color: #28a745; }
+        .status-dot.disconnected { background-color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><span id="status-indicator" class="status-dot"></span>Real-Time Cafe Analytics</h1>
+        
+        <div class="metrics-grid">
+            <div id="total-occupancy" class="metric-card">
+                <h2>Total Occupancy (Non-Barista)</h2>
+                <ul>
+                    <li>
+                        <span>Current Guests:</span>
+                        <span id="total-count" class="value">--</span>
+                    </li>
+                </ul>
+            </div>
+
+            <div id="barista-status" class="metric-card">
+                <h2>Barista Status</h2>
+                <ul>
+                    <li>
+                        <span>Staff Present:</span>
+                        <span id="barista-count" class="value">--</span>
+                    </li>
+                </ul>
+            </div>
+
+            <div id="zone-counts" class="metric-card">
+                <h2>Consolidated Zone Counts</h2>
+                <ul id="zone-list">
+                    <!-- Zone data will be dynamically inserted here -->
+                </ul>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // This is where our real-time JavaScript will go
+    const totalCountElem = document.getElementById('total-count');
+    const baristaCountElem = document.getElementById('barista-count');
+    const zoneListElem = document.getElementById('zone-list');
+    const statusIndicator = document.getElementById('status-indicator');
+
+    console.log("Connecting to data stream...");
+
+    // Create a connection to our Server-Sent Events endpoint
+    const eventSource = new EventSource("/stream/metrics");
+
+    eventSource.onopen = function() {
+        console.log("Connection to stream opened.");
+        statusIndicator.classList.remove('disconnected');
+        statusIndicator.classList.add('connected');
+    };
+
+    // This event is fired every time the server sends a message
+    eventSource.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        console.log("Received data:", data);
+
+        // Update Total Occupancy
+        totalCountElem.textContent = data.total_occupancy;
+
+        // Update Barista Status
+        const baristaCount = data.consolidated_counts.barista || 0;
+        baristaCountElem.textContent = baristaCount > 0 ? "Yes" : "No";
+        baristaCountElem.style.color = baristaCount > 0 ? '#28a745' : '#dc3545';
+        
+        // Update Zone List
+        zoneListElem.innerHTML = ''; // Clear previous list
+        for (const [zone, count] of Object.entries(data.consolidated_counts)) {
+            const listItem = document.createElement('li');
+            listItem.innerHTML = `<span>${zone.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}:</span> <span class="value">${count}</span>`;
+            zoneListElem.appendChild(listItem);
+        }
+    };
+
+    eventSource.onerror = function(err) {
+        console.error("EventSource failed:", err);
+        statusIndicator.classList.remove('connected');
+        statusIndicator.classList.add('disconnected');
+        totalCountElem.textContent = 'Error';
+        // The browser will automatically try to reconnect
+    };
+
+</script>
+</body>
+</html>

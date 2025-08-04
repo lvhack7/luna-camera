@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+redis
+asyncpg
+sqlalchemy
+python-telegram-bot==21.0.1
+apscheduler
+jinja2
+sse-starlette
