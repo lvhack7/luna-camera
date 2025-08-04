@@ -50,7 +50,9 @@ services:
 
   # Vision Processor: The AI service that runs detection and tracking on the GPU
   vision-processor:
-    build: ./vision-processor
+    build: 
+      context: ./vision-processor
+      dockerfile: Dockerfile
     container_name: vision
     restart: always
     env_file: .env
