@@ -42,7 +42,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "5501:5501" # Expose API to host machine
+      - "127.0.0.1:5501:5501" # Expose API to host machine
     volumes:
       - ./api-server/app:/app/app # Mount code for live-reloading in dev
     networks:
@@ -60,17 +60,16 @@ services:
       - ./configs:/app/configs:ro # Mount configs as read-only
     networks:
       - vision-net
-    deploy: {}
     # --- GPU ACCELERATION FOR NVIDIA ---
     # This section is critical for production deployment on a Linux server with an NVIDIA GPU.
     # It will NOT work on your M2 Mac. The container will fail to start.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all # Use all available GPUs
-    #           capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # Use all available GPUs
+              capabilities: [gpu]
 
 # Define the shared network for inter-service communication
 networks:
