@@ -26,9 +26,11 @@ def get_device():
         return "mps"
     return "cpu"
 
+
 def process_camera(camera_id: str, config: dict):
     """Process loop for a single camera: detection, tracking, zone counting, and Redis publish."""
-    # 1) Resolve RTSP URL
+    # 1) Resolve RTSP URL and set TCP option
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
     rtsp_url = config.get("rtsp_url") or os.getenv(config.get("rtsp_url_env", ""), "")
     if not rtsp_url:
         print(f"[{camera_id}] FATAL: no RTSP URL in config or env.", flush=True)
@@ -54,17 +56,14 @@ def process_camera(camera_id: str, config: dict):
     print(f"[{camera_id}] Connected to Redis at {REDIS_HOST}:{REDIS_PORT}", flush=True)
 
     # 4) Initialize tracker and zones
-    tracker = sv.ByteTrack()  # stable ID tracking
-    zones      = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32))
-                  for z in config["zones"]]
+    tracker = sv.ByteTrack()
+    zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32)) for z in config["zones"]]
     zone_names = [z["name"] for z in config["zones"]]
     print(f"[{camera_id}] Initialized tracker and {len(zones)} zones.", flush=True)
 
     # 5) State for entry/exit events
     prev_zone_per_id = {}
-    entry_count = 0
-    exit_count  = 0
-
+    
     print(f"[{camera_id}] Entering main loop...", flush=True)
     while True:
         ret, frame = cap.read()
@@ -75,61 +74,63 @@ def process_camera(camera_id: str, config: dict):
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
             continue
         
-        # --- Detection ---
-        results    = model(frame, conf=CONF_THRESHOLD, classes=[0], device=device)[0]
+        # --- Detection & Tracking ---
+        results = model(frame, conf=CONF_THRESHOLD, classes=[0], device=device, verbose=False)[0]
         detections = sv.Detections.from_ultralytics(results)
-        print(f"[{camera_id}] Detected {len(detections)} raw people.", flush=True)
-
-        # --- Tracking ---
         tracks = tracker.update_with_detections(detections)
-        print(f"[{camera_id}] Tracking {len(tracks)} people.", flush=True)
+        print(f"[{camera_id}] Detected {len(detections)} raw, Tracking {len(tracks)} people.", flush=True)
 
-        # --- Zone Occupancy & Events ---
-        occupancy = {}
+        # --- Zone Occupancy (for real-time dashboard) ---
+        occupancy_counts = {}
         for name, zone in zip(zone_names, zones):
             mask = zone.trigger(detections=tracks)
-            cnt  = int(np.sum(mask))
-            occupancy[name] = cnt
-            if cnt:
-                print(f"[{camera_id}]  → {cnt} in zone '{name}'", flush=True)
+            count = int(np.sum(mask))
+            occupancy_counts[name] = occupancy_counts.get(name, 0) + count
+            if count > 0:
+                print(f"[{camera_id}]  → {count} in zone '{name}'", flush=True)
 
-        # Entry/exit transitions based on 'inside' zone
-        for tid, box in zip(tracks.tracker_id, tracks.xyxy):
-            # compute centroid
-            x1, y1, x2, y2 = box
-            cx, cy = int((x1+x2)/2), int((y1+y2)/2)
+        # --- Entry/Exit Transitions (for historical reporting) ---
+        for track_id, box in zip(tracks.tracker_id, tracks.xyxy):
+            # FIX 1: Use the correct method to check zone containment
+            # Create a temporary Detections object for the single track
+            single_track_detection = sv.Detections(xyxy=np.array([box]))
 
-            # detect current zone
-            current = None
+            current_zone = None
             for name, zone in zip(zone_names, zones):
-                if zone.contains_point((cx, cy)):
-                    current = name
-                    break
+                # The .trigger() method is the modern way to check for intersection
+                if zone.trigger(detections=single_track_detection)[0]:
+                    current_zone = name
+                    break # Assign the first zone found
 
-            prev = prev_zone_per_id.get(tid)
-            if prev != current:
-                # example: count entry if coming from outside into 'inside_zone'
-                if prev is None and current == "inside_zone":
-                    entry_count += 1
-                    print(f"[{camera_id}] ENTRY #{entry_count} by track {tid}", flush=True)
-                # count exit if leaving 'inside_zone'
-                if prev == "inside_zone" and current is None:
-                    exit_count += 1
-                    print(f"[{camera_id}] EXIT  #{exit_count} by track {tid}", flush=True)
-
-                prev_zone_per_id[tid] = current
-
-        # --- Publish counts ---
+            prev_zone = prev_zone_per_id.get(track_id)
+            
+            # If the zone has changed, fire an event
+            if prev_zone != current_zone:
+                event_payload = {
+                    "timestamp": time.time(), "tracker_id": int(track_id), "camera_id": camera_id,
+                    "from_zone": prev_zone or "outside",
+                    "to_zone": current_zone or "outside"
+                }
+                if event_payload["from_zone"] != event_payload["to_zone"]:
+                    r.publish(ZONE_CHANGE_CHANNEL, json.dumps(event_payload))
+                    print(f"[{camera_id}] EVENT: Track {track_id} moved from {event_payload['from_zone']} to {event_payload['to_zone']}", flush=True)
+                
+                # Update the state for the next frame
+                if current_zone:
+                    prev_zone_per_id[track_id] = current_zone
+                elif track_id in prev_zone_per_id:
+                    # The track has left all zones, remove it from state
+                    del prev_zone_per_id[track_id]
+        
+        # --- Publish Instantaneous Occupancy Data ---
+        # FIX 2: Rename 'occupancy' key to 'zone_counts' to match API server
         data_payload = {
-            "camera_id": camera_id,
             "timestamp": time.time(),
-            "occupancy": occupancy,
-            "entries": entry_count,
-            "exits": exit_count
+            "camera_id": camera_id,
+            "zone_counts": occupancy_counts 
         }
         r.publish(DATA_CHANNEL, json.dumps(data_payload))
 
-        # short sleep to match roughly camera FPS
         time.sleep(0.05)
 
 

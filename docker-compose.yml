@@ -52,7 +52,7 @@ services:
   vision-processor:
     build: 
       context: ./vision-processor
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     container_name: vision
     restart: always
     env_file: .env
@@ -65,13 +65,13 @@ services:
     # --- GPU ACCELERATION FOR NVIDIA ---
     # This section is critical for production deployment on a Linux server with an NVIDIA GPU.
     # It will NOT work on your M2 Mac. The container will fail to start.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all # Use all available GPUs
-              capabilities: [gpu]
+    deploy: {}
+      # resources:
+      #   reservations:
+      #     devices:
+      #       - driver: nvidia
+      #         count: all # Use all available GPUs
+      #         capabilities: [gpu]
 
 # Define the shared network for inter-service communication
 networks:
