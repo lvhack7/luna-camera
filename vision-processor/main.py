@@ -10,11 +10,19 @@ import supervision as sv
 from multiprocessing import Process
 
 # --- Configuration Constants ---
-MODEL_NAME = os.getenv("MODEL_NAME", "yolov11l.pt")
-# LOW threshold is for feeding the tracker
+MODEL_NAME = os.getenv("MODEL_NAME", "yolo11l.pt")
+# Low confidence for initial detection to feed the tracker
 CONF_LOW = 0.1
-# HIGH threshold is for the final, stable count
-CONF_HIGH = float(os.getenv("CONFIDENCE_THRESHOLD", 0.3))
+# High confidence to promote a 'Candidate' to 'Confirmed'
+CONF_HIGH_TO_CONFIRM = float(os.getenv("CONFIDENCE_THRESHOLD", 0.5))
+
+# --- STATEFUL TRACKING PARAMETERS (Tuning Knobs) ---
+# How many consecutive frames a track must be seen with high confidence to be 'Confirmed'
+FRAMES_TO_CONFIRM = 10
+# How many frames a 'Confirmed' track can be 'Coasting' (undetected) before being 'Lost'
+FRAMES_TO_COAST = 30 
+
+# Redis Configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 DATA_CHANNEL = "vision-data-events"
@@ -30,7 +38,7 @@ def get_device():
     return "cpu"
 
 def process_camera(camera_id: str, config: dict):
-    """Process loop for a single camera using the proven 'low-confidence handshake'."""
+    """Process loop for a single camera with stateful, stable tracking (Algorithm of Intent)."""
     try:
         # 1) Setup: RTSP URL, TCP, VideoCapture
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -53,19 +61,14 @@ def process_camera(camera_id: str, config: dict):
         r.ping()
         print(f"[{camera_id}] Connected to Redis.", flush=True)
 
-        # 3) Setup: Tracker and Zones with robust settings
-        tracker = sv.ByteTrack()
-        zones = [
-            sv.PolygonZone(
-                polygon=np.array(z["polygon"], np.int32)
-                # We will specify the anchor point in the trigger() call, which is more robust
-            )
-            for z in config["zones"]
-        ]
+        # 3) Setup: Tracker and Zones
+        tracker = sv.ByteTrack(track_thresh=0.25, track_buffer=FRAMES_TO_COAST + 10, match_thresh=0.8, frame_rate=30)
+        zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32)) for z in config["zones"]]
         zone_names = [z["name"] for z in config["zones"]]
         print(f"[{camera_id}] Initialized ROBUST tracker and {len(zones)} zones.", flush=True)
 
-        # 4) Setup: State Management for Entry/Exit and Alerts
+        # 4) Setup: State Management
+        tracked_objects = {} # Main dictionary to hold the state of each object
         prev_zone_per_id = {}
         alert_config = config.get('alert_config')
         alert_state = {"last_detection_time": time.time(), "alert_sent": False}
@@ -81,35 +84,79 @@ def process_camera(camera_id: str, config: dict):
         ret, frame = cap.read()
         if not ret or frame is None:
             print(f"[{camera_id}] WARNING: empty frame, reconnecting...", flush=True)
-            time.sleep(5)
-            cap.release()
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-            continue
+            time.sleep(5); cap.release(); cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG); continue
         
-        # --- ROBUST DETECTION & TRACKING (from your working test script) ---
-        # Step 1: Detect with a VERY LOW threshold to get all potential objects
+        # --- DETECTION & TRACKING ---
         results = model(frame, conf=CONF_LOW, classes=[0], device=device, verbose=False)[0]
         all_detections = sv.Detections.from_ultralytics(results)
-        
-        # Step 2: Give EVERYTHING to the tracker
         tracks = tracker.update_with_detections(all_detections)
+
+        # --- "ALGORITHM OF INTENT" - STATEFUL LOGIC ---
         
-        # Step 3: AFTER tracking, filter for tracks you are confident in for counting
-        # This is the "stable" set that your test script proved works.
-        stable_tracks = tracks[tracks.confidence > CONF_HIGH] if tracks is not None else sv.Detections.empty()
+        # Get IDs from the current frame's tracks
+        current_frame_track_ids = set(tracks.tracker_id) if tracks.tracker_id is not None else set()
 
-        print(f"[{camera_id}] Detections: {len(all_detections)}, Stable Tracks for Counting: {len(stable_tracks)}", flush=True)
+        # --- A. Match and Update Existing Objects ---
+        for obj_id in list(tracked_objects.keys()):
+            if obj_id in current_frame_track_ids:
+                # Object is still visible
+                tracked_objects[obj_id]['misses'] = 0
+                tracked_objects[obj_id]['seen_frames'] += 1
+                
+                # Promote 'Candidate' to 'Confirmed' if seen long enough with high confidence
+                if tracked_objects[obj_id]['state'] == 'Candidate':
+                    # Find the confidence for this specific track
+                    track_confidence = tracks[tracks.tracker_id == obj_id].confidence[0]
+                    if track_confidence > CONF_HIGH_TO_CONFIRM:
+                        tracked_objects[obj_id]['high_conf_frames'] += 1
+                    if tracked_objects[obj_id]['high_conf_frames'] >= FRAMES_TO_CONFIRM:
+                        tracked_objects[obj_id]['state'] = 'Confirmed'
+            else:
+                # Object is NOT visible in this frame
+                tracked_objects[obj_id]['misses'] += 1
+                if tracked_objects[obj_id]['state'] in ['Confirmed', 'Coasting']:
+                    if tracked_objects[obj_id]['misses'] <= FRAMES_TO_COAST:
+                        tracked_objects[obj_id]['state'] = 'Coasting'
+                    else:
+                        tracked_objects[obj_id]['state'] = 'Lost'
 
-        # --- ZONE OCCUPANCY ---
+        # --- B. Add New Candidate Objects ---
+        if tracks.tracker_id is not None:
+            for i in range(len(tracks)):
+                track_id = tracks.tracker_id[i]
+                if track_id not in tracked_objects:
+                    tracked_objects[track_id] = {
+                        'state': 'Candidate',
+                        'misses': 0,
+                        'seen_frames': 1,
+                        'high_conf_frames': 1 if tracks.confidence[i] > CONF_HIGH_TO_CONFIRM else 0,
+                    }
+
+        # --- C. Prune Lost Objects ---
+        lost_ids = [obj_id for obj_id, data in tracked_objects.items() if data['state'] == 'Lost']
+        for obj_id in lost_ids:
+            del tracked_objects[obj_id]
+            if obj_id in prev_zone_per_id:
+                del prev_zone_per_id[obj_id]
+        
+        # --- D. Final Counting and Zone Logic ---
+        # The final set of people to count are those who are 'Confirmed' or 'Coasting'
+        stable_track_ids = [obj_id for obj_id, data in tracked_objects.items() if data['state'] in ['Confirmed', 'Coasting']]
+        stable_tracks = sv.Detections.empty()
+        if len(stable_track_ids) > 0 and tracks.tracker_id is not None:
+            stable_mask = np.isin(tracks.tracker_id, stable_track_ids)
+            stable_tracks = tracks[stable_mask]
+
+        print(f"[{camera_id}] Detections: {len(all_detections)}, Stable Count: {len(stable_track_ids)}", flush=True)
+
+        # --- Zone Occupancy ---
         occupancy_counts = {}
         for name, zone in zip(zone_names, zones):
-            # Pass the stable tracks and the anchor point to the trigger
-            mask = zone.trigger(detections=stable_tracks)
+            mask = zone.trigger(detections=stable_tracks, anchor=sv.Position.CENTER)
             count = int(np.sum(mask))
             occupancy_counts[name] = occupancy_counts.get(name, 0) + count
-        
-        # --- ENTRY/EXIT TRANSITIONS ---
-        # FIX: Check if stable_tracks has valid data before iterating
+
+            
         if stable_tracks.tracker_id is not None:
             for track_id, box in zip(stable_tracks.tracker_id, stable_tracks.xyxy):
                 single_track_detection = sv.Detections(xyxy=np.array([box]))
