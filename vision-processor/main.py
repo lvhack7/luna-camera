@@ -104,7 +104,7 @@ def process_camera(camera_id: str, config: dict):
         occupancy_counts = {}
         for name, zone in zip(zone_names, zones):
             # Pass the stable tracks and the anchor point to the trigger
-            mask = zone.trigger(detections=stable_tracks, anchor=sv.Position.CENTER)
+            mask = zone.trigger(detections=stable_tracks)
             count = int(np.sum(mask))
             occupancy_counts[name] = occupancy_counts.get(name, 0) + count
         
@@ -115,7 +115,7 @@ def process_camera(camera_id: str, config: dict):
                 single_track_detection = sv.Detections(xyxy=np.array([box]))
                 current_zone = None
                 for name, zone in zip(zone_names, zones):
-                    if zone.trigger(detections=single_track_detection, anchor=sv.Position.CENTER)[0]:
+                    if zone.trigger(detections=single_track_detection)[0]:
                         current_zone = name
                         break
                 
