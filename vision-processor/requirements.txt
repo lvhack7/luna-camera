@@ -7,7 +7,7 @@ torchaudio
 # For computer vision and zone analysis
 # Use the headless version for server/docker environments
 opencv-python-headless
-supervision
+supervision==0.18.0
 numpy
 
 # For communication with the API server

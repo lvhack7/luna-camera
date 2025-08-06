@@ -63,7 +63,7 @@ def process_camera(camera_id: str, config: dict):
 
         # 3) Setup: Tracker and Zones
         tracker = sv.ByteTrack(track_thresh=0.25, track_buffer=FRAMES_TO_COAST + 10, match_thresh=0.8, frame_rate=30)
-        zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32)) for z in config["zones"]]
+        zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=tuple(config['resolution_wh'])) for z in config["zones"]]
         zone_names = [z["name"] for z in config["zones"]]
         print(f"[{camera_id}] Initialized ROBUST tracker and {len(zones)} zones.", flush=True)
 
@@ -152,7 +152,7 @@ def process_camera(camera_id: str, config: dict):
         # --- Zone Occupancy ---
         occupancy_counts = {}
         for name, zone in zip(zone_names, zones):
-            mask = zone.trigger(detections=stable_tracks, anchor=sv.Position.CENTER)
+            mask = zone.trigger(detections=stable_tracks)
             count = int(np.sum(mask))
             occupancy_counts[name] = occupancy_counts.get(name, 0) + count
 
