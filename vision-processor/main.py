@@ -31,6 +31,11 @@ def is_frame_corrupted(frame: np.ndarray, threshold: float = 10.0) -> bool:
     """Checks if a frame is likely corrupted (e.g., solid gray) by checking its pixel variance."""
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     std_dev = np.std(gray_frame)
+    
+    # --- ADD THIS DIAGNOSTIC PRINT ---
+    print(f"[Corruption Check] Frame Standard Deviation: {std_dev:.2f}")
+    # ---------------------------------
+    
     return std_dev < threshold
 
 def process_camera(camera_id: str, config: dict):
