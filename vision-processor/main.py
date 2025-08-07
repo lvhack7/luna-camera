@@ -42,10 +42,8 @@ def process_camera(camera_id: str, config: dict):
     """Main processing loop with stateful tracking and resilience to corrupted frames."""
     try:
         # 1) Setup
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         rtsp_url = os.getenv(config.get("rtsp_url_env", ""), "")
-        if not rtsp_url:
-            print(f"[{camera_id}] FATAL: no RTSP URL", flush=True); return
+
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             print(f"[{camera_id}] ERROR: cannot open stream {rtsp_url}", flush=True); return
