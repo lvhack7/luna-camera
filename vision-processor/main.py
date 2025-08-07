@@ -78,7 +78,7 @@ def process_camera(camera_id: str, config: dict):
     while True:
         ret, frame = cap.read()
         
-        is_corrupt = (not ret or frame is None or frame.std() < 5)
+        is_corrupt = (not ret or frame is None or frame.std() < 1)
         if is_corrupt:
             print(f"[{camera_id}] Corrupted frame! Preserving last count.", flush=True)
             data_payload = {"timestamp": time.time(), "camera_id": camera_id, "zone_counts": last_known_occupancy}
