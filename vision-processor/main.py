@@ -139,7 +139,7 @@ def process_camera(camera_id: str, config: dict):
 
         occupancy_counts = {}
         for name, zone in zip(zone_names, zones):
-            mask = zone.trigger(detections=stable_tracks, anchor=sv.Position.CENTER)
+            mask = zone.trigger(detections=stable_tracks)
             count = int(np.sum(mask))
             occupancy_counts[name] = occupancy_counts.get(name, 0) + count
         
