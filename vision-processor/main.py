@@ -75,11 +75,12 @@ def process_camera(camera_id: str, config: dict):
     print(f"[{camera_id}] Entering main loop...", flush=True)
     while True:
         ret, frame = cap.read()
+
         if not ret or frame is None:
             print(f"[{camera_id}] WARNING: empty frame, reconnecting...", flush=True)
             time.sleep(5); cap.release(); cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG); continue
         
-        if is_frame_corrupted(frame):
+        if frame.std() < 10:
             print(f"[{camera_id}] Corrupted frame detected! Preserving last count.", flush=True)
             data_payload = {"timestamp": time.time(), "camera_id": camera_id, "zone_counts": last_known_occupancy}
             r.publish(DATA_CHANNEL, json.dumps(data_payload))
