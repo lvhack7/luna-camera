@@ -15,7 +15,7 @@ from queue import Queue, Empty
 ALMATY_TZ        = ZoneInfo("Asia/Almaty")
 OPEN_T           = dtime(8, 30)           # 08:30
 CLOSE_T          = dtime(23, 59, 59)      # ~24:00
-MODEL_NAME       = os.getenv("MODEL_NAME", "yolo11m.pt")
+MODEL_NAME       = os.getenv("MODEL_NAME", "yolo11l.pt")
 
 CONF_DETECT_LOW  = float(os.getenv("CONF_DETECT_LOW", 0.10))
 IOU_NMS          = float(os.getenv("IOU_NMS", 0.30))
@@ -93,6 +93,7 @@ def process_camera(camera_id: str, config: dict):
     time.sleep(1.5)
 
     device = get_device()
+    print("MODEL: ", MODEL_NAME)
     model = YOLO(MODEL_NAME)
 
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
