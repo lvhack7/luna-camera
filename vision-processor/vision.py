@@ -180,25 +180,31 @@ def process_camera(camera_id: str, config: dict):
 
         # Per-polygon time hysteresis → enter events
         enter_events: List[tuple] = []  # (zname, tid, ts)
-        if stable.tracker_id is not None:
-            for di, tid in enumerate(stable.tracker_id or []):
-                tid = int(tid)
-                for pi in range(len(zones)):
-                    inside = bool(zone_masks[pi][di])
-                    st = zone_state[tid][pi]
-                    zname = names_lc[pi]
-                    if inside:
-                        if st["first_in"] is None: st["first_in"] = now
-                        st["last_in"] = now
-                        if not st["is_member"] and (now - st["first_in"]) >= ENTER_SECONDS:
-                            st["is_member"] = True
-                            enter_events.append((zname, tid, now))
-                            r.publish(ZONE_CHANGE_CH, json.dumps({"timestamp": now,"camera_id": camera_id,"tracker_id": tid,"event":"enter","zone": zname}))
-                    else:
-                        st["first_in"] = None
-                        if st["is_member"] and st["last_in"] and (now - st["last_in"]) >= EXIT_SECONDS:
-                            st["is_member"] = False
-                            r.publish(ZONE_CHANGE_CH, json.dumps({"timestamp": now,"camera_id": camera_id,"tracker_id": tid,"event":"exit","zone": zname}))
+        for di, detection_data in enumerate(stable):
+            tracker_id = detection_data[4]
+
+            if tracker_id is None:
+                continue
+            tid = int(tracker_id)
+
+            # Now, check its membership in each zone
+            for pi in range(len(zones)):
+                inside = bool(zone_masks[pi][di])
+                st = zone_state[tid][pi]
+                zname = names_lc[pi]
+                if inside:
+                    if st["first_in"] is None: st["first_in"] = now
+                    st["last_in"] = now
+                    if not st["is_member"] and (now - st["first_in"]) >= ENTER_SECONDS:
+                        st["is_member"] = True
+                        enter_events.append((zname, tid, now))
+                        r.publish(ZONE_CHANGE_CH, json.dumps({"timestamp": now,"camera_id": camera_id,"tracker_id": tid,"event":"enter","zone": zname}))
+                else:
+                    st["first_in"] = None
+                    if st["is_member"] and st["last_in"] and (now - st["last_in"]) >= EXIT_SECONDS:
+                        st["is_member"] = False
+                        r.publish(ZONE_CHANGE_CH, json.dumps({"timestamp": now,"camera_id": camera_id,"tracker_id": tid,"event":"exit","zone": zname}))
+
 
         # ========== CONVERSIONS: camera_201 ONLY ==========
         if camera_id == "camera_201" and enter_events:
