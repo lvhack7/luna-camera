@@ -104,7 +104,7 @@ def process_camera(camera_id: str, config: dict):
     zones_cfg = config["zones"]
     names = [z["name"] for z in zones_cfg]
     names_lc = [n.lower() for n in names]
-    zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32)) for z in zones_cfg]
+    zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=(1920, 1080), triggering_position=sv.Position.CENTER) for z in zones_cfg]
 
     # Index sets
     idx_hall   = [i for i,n in enumerate(names_lc) if n == "hall"]
