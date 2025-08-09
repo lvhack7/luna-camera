@@ -1,16 +1,24 @@
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+    async_sessionmaker,
+)
+from sqlalchemy.orm import DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@host:port/db")
 ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-async_engine = create_async_engine(ASYNC_DATABASE_URL)
-AsyncSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=async_engine, class_=AsyncSession)
+class Base(DeclarativeBase):
+    pass
 
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
+# Echo=False for prod; flip to True while debugging SQL
+async_engine: AsyncEngine = create_async_engine(ASYNC_DATABASE_URL, echo=False, future=True)
+
+# Use expire_on_commit=False so objects keep attributes after commit
+AsyncSessionLocal = async_sessionmaker(
+    bind=async_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
