@@ -157,7 +157,7 @@ def process_camera(camera_id: str, config: dict):
     # zones
     zones_cfg = config["zones"]
     zone_names = [z["name"] for z in zones_cfg]
-    zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=(1920, 1080), trigger_anchors=[sv.Position.CENTER]) for z in zones_cfg]
+    zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=(1920, 1080), triggering_position=sv.Position.CENTER) for z in zones_cfg]
 
     # derived names (if exist)
     has_queue  = any(n.lower() == "queue"  for n in zone_names)
