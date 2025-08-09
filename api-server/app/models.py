@@ -18,10 +18,6 @@ class OccupancyLog(Base):
     queue_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
     hall_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
 
-    __table_args__ = (
-        sa.Index("ix_occupancy_log_ts", "ts"),
-    )
-
 # ---------- Zone transitions (enter/exit), from Redis listener ----------
 class TransitionEvent(Base):
     __tablename__ = "transition_event"
