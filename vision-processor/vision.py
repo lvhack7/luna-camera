@@ -176,7 +176,7 @@ def process_camera(camera_id: str, config: dict):
         zone_masks: List[np.ndarray] = [np.array([], dtype=bool)] * len(zones)
         if len(stable) > 0 and stable.tracker_id is not None:
             for i, zone in enumerate(zones):
-                zone_masks[i] = zone.trigger(detections=stable, anchor=sv.Position.CENTER)
+                zone_masks[i] = zone.trigger(detections=stable)
 
         # Per-polygon time hysteresis → enter events
         enter_events: List[tuple] = []  # (zname, tid, ts)
