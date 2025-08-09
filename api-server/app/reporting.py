@@ -1,69 +1,117 @@
+# app/reporting.py
 import os
-import pandas as pd
-from sqlalchemy import text
+import csv
 from datetime import datetime, timedelta
-import asyncio
-from .database import engine
-from .telegram_bot import send_telegram_message
+from zoneinfo import ZoneInfo
+from sqlalchemy import select, func
+import redis.asyncio as redis
 
-REPORTS_DIR = "reports"
+from . import models
 
-def generate_daily_report():
-    print("Generating daily report...")
-    if not os.path.exists(REPORTS_DIR):
-        os.makedirs(REPORTS_DIR)
-    
-    db = engine.connect()
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=1)
-    
-    # 1. Peak Occupancy
-    occ_query = text(f"SELECT timestamp, total_occupancy FROM occupancy_logs WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'")
-    df_occ = pd.read_sql(occ_query, db)
-    peak_info = "Not enough data"
-    if not df_occ.empty:
-        peak_row = df_occ.loc[df_occ['total_occupancy'].idxmax()]
-        peak_info = f"{int(peak_row['total_occupancy'])} guests at {pd.to_datetime(peak_row['timestamp']).strftime('%H:%M')} UTC"
+def _dates_for_report(tz: ZoneInfo, open_t, close_t, date_override: str | None = None):
+    if date_override:
+        day = datetime.strptime(date_override, "%Y-%m-%d").replace(tzinfo=tz)
+    else:
+        now = datetime.now(tz)
+        # run at 00:05 for previous day
+        day = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = day.replace(hour=open_t.hour, minute=open_t.minute, second=0, microsecond=0)
+    end = day.replace(hour=23, minute=59, second=59, microsecond=0)  # close at ~24:00
+    return day, start, end
 
-    # 2. Conversion & Entry/Exit Stats
-    trans_query = text(f"SELECT from_zone, to_zone, tracker_id FROM transition_events WHERE timestamp BETWEEN '{start_time}' AND '{end_time}'")
-    df_trans = pd.read_sql(trans_query, db)
-    total_entries, queue_entries, queue_to_hall = 0, 0, 0
-    if not df_trans.empty:
-        total_entries = df_trans[(df_trans['from_zone'] == 'outside') & (df_trans['to_zone'] != 'outside')]['tracker_id'].nunique()
-        queue_entries = df_trans[df_trans['to_zone'] == 'queue']['tracker_id'].nunique()
-        queue_to_hall = df_trans[(df_trans['from_zone'] == 'queue') & (df_trans['to_zone'] == 'hall')]['tracker_id'].nunique()
-    conversion_rate = (queue_to_hall / queue_entries) * 100 if queue_entries > 0 else 0
+def _day_key(prefix: str, day: datetime):
+    return f"{prefix}:{day.strftime('%Y-%m-%d')}"
 
-    # 3. Alert Stats
-    alert_query = text(f"SELECT COUNT(*) FROM alert_logs WHERE alert_type = 'STAFF_ABSENCE' AND timestamp BETWEEN '{start_time}' AND '{end_time}'")
-    barista_alerts = db.execute(alert_query).scalar_one_or_none() or 0
-    
-    db.close()
+async def generate_daily_report(AsyncSessionLocal, r: redis.Redis, reports_dir: str,
+                                tz: ZoneInfo, open_t, close_t, date_override: str | None = None):
+    day, start, end = _dates_for_report(tz, open_t, close_t, date_override)
 
-    # 4. Assemble and Save Report
-    report_data = {
-        "Metric": ["Total Unique Entries", "Unique People in Queue", "Queue-to-Hall Transitions", "Queue Conversion Rate (%)", "Peak Occupancy", "Barista Absence Alerts"],
-        "Value": [total_entries, queue_entries, queue_to_hall, f"{conversion_rate:.2f}", peak_info, barista_alerts]
-    }
-    df_report = pd.DataFrame(report_data)
-    report_date = start_time.strftime('%Y-%m-%d')
-    report_filename = os.path.join(REPORTS_DIR, f"daily_summary_{report_date}.csv")
-    df_report.to_csv(report_filename, index=False)
-    print(f"Report saved to {report_filename}")
+    # 1) Pull baseline deltas from Redis (baseline taken at 08:30, so "current - baseline" at 24:00 equals day totals)
+    async def _get(name): 
+        v = await r.get(_day_key(name, day)); 
+        if v is None: return 0
+        try: return float(v) if name.startswith("sum:") else int(v)
+        except: return 0
 
-    # 5. Push Report Summary
-    summary = (
-        f"📊 *Daily Analytics Report: {report_date}*\n\n"
-        f"✅ *Entries & Conversion:*\n"
-        f"  - Total Guests Entered: `{total_entries}`\n"
-        f"  - Entered Queue: `{queue_entries}`\n"
-        f"  - Converted (Queue → Hall): `{queue_to_hall}`\n"
-        f"  - Conversion Rate: `{conversion_rate:.2f}%`\n\n"
-        f"📈 *Occupancy:*\n"
-        f"  - Peak Guests: `{peak_info}`\n\n"
-        f"🚨 *Alerts:*\n"
-        f"  - Barista Absence Alerts: `{barista_alerts}`"
-    )
-    asyncio.run(send_telegram_message(summary))
-    return report_filename
+    keys = ["order_unique","pickup_unique","conv:order_to_pickup","conv:pickup_to_hall","conv:pickup_to_exit",
+            "sum:o2p_s","cnt:o2p","sum:p2h_s","cnt:p2h","sum:p2e_s","cnt:p2e","alerts:barista"]
+    vals = {k: await _get(k) for k in keys}
+
+    def rate(num, den): return (num / den) if den > 0 else 0.0
+    def avg(sum_s, cnt): return (sum_s / cnt) if cnt > 0 else 0.0
+
+    # 2) Peak occupancy from DB
+    async with AsyncSessionLocal() as session:
+        # total occupancy peak and when
+        q = (
+            select(models.OccupancyLog.ts, models.OccupancyLog.total_occupancy)
+            .where(models.OccupancyLog.ts >= start, models.OccupancyLog.ts <= end)
+            .order_by(models.OccupancyLog.total_occupancy.desc())
+            .limit(1)
+        )
+        res = (await session.execute(q)).first()
+        peak_ts, peak_val = (res[0], res[1]) if res else (None, 0)
+
+        # total visitors (unique tracker ids touching order or hall1/2 on camera_201)
+        tv = (
+            select(func.count(func.distinct(models.TransitionEvent.tracker_id)))
+            .where(
+                models.TransitionEvent.camera_id == "camera_201",
+                models.TransitionEvent.timestamp >= start.timestamp(),
+                models.TransitionEvent.timestamp <= end.timestamp(),
+                models.TransitionEvent.event == "enter",
+                models.TransitionEvent.zone.in_(["order","hall1","hall2"])
+            )
+        )
+        visitors_total = (await session.execute(tv)).scalar_one() or 0
+
+        # total barista alerts (also in Redis, but DB is authoritative)
+        tb = (
+            select(func.count())
+            .select_from(models.AlertLog)
+            .where(
+                models.AlertLog.timestamp >= start.timestamp(),
+                models.AlertLog.timestamp <= end.timestamp(),
+                models.AlertLog.alert_type == "STAFF_ABSENCE"
+            )
+        )
+        barista_alerts_db = (await session.execute(tb)).scalar_one() or 0
+
+    # Prefer DB count for alerts; fall back to Redis if DB is empty
+    alerts_barista = barista_alerts_db if barista_alerts_db else int(vals.get("alerts:barista", 0))
+
+    # 3) Compute KPIs
+    order_unique       = int(vals["order_unique"])
+    pickup_unique      = int(vals["pickup_unique"])
+    conv_o2p           = int(vals["conv:order_to_pickup"])
+    conv_p2h           = int(vals["conv:pickup_to_hall"])
+    conv_p2e           = int(vals["conv:pickup_to_exit"])
+    avg_o2p_s          = avg(vals["sum:o2p_s"], vals["cnt:o2p"])
+    avg_p2h_s          = avg(vals["sum:p2h_s"], vals["cnt:p2h"])
+    avg_p2e_s          = avg(vals["sum:p2e_s"], vals["cnt:p2e"])
+    rate_o2p           = rate(conv_o2p, order_unique)
+    rate_p2h           = rate(conv_p2h, pickup_unique)
+    rate_p2e           = rate(conv_p2e, pickup_unique)
+
+    # 4) Write CSV
+    os.makedirs(reports_dir, exist_ok=True)
+    fname = f"{day.strftime('%Y-%m-%d')}_daily_report.csv"
+    fpath = os.path.join(reports_dir, fname)
+    with open(fpath, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Дата", day.strftime("%Y-%m-%d")])
+        w.writerow(["Окно анализа (Алматы)", start.strftime("%H:%M"), end.strftime("%H:%M")])
+        w.writerow([])
+        w.writerow(["Пиковая загрузка (чел.)", peak_val])
+        w.writerow(["Время пика (локально)", peak_ts.astimezone(tz).strftime("%H:%M") if peak_ts else "—"])
+        w.writerow([])
+        w.writerow(["Всего посетителей (уникальные треки 201: order | hall1 | hall2)", visitors_total])
+        w.writerow(["Предупреждений по бариста", alerts_barista])
+        w.writerow([])
+        w.writerow(["Показатель", "Числитель", "Знаменатель", "Конверсия", "Среднее время (сек)"])
+        w.writerow(["Order → Pickup", conv_o2p, order_unique, f"{rate_o2p:.2%}", f"{avg_o2p_s:.1f}"])
+        w.writerow(["Pickup → Hall",  conv_p2h, pickup_unique, f"{rate_p2h:.2%}", f"{avg_p2h_s:.1f}"])
+        w.writerow(["Pickup → Exit",  conv_p2e, pickup_unique, f"{rate_p2e:.2%}", f"{avg_p2e_s:.1f}"])
+
+    print(f"[report] saved {fpath}")
+    return fpath

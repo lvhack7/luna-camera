@@ -44,7 +44,7 @@ services:
     ports:
       - "127.0.0.1:5501:5501" # Expose API to host machine
     volumes:
-      - ./api-server/app:/app/app # Mount code for live-reloading in dev
+      - reports:/app/reports
     networks:
       - vision-net
 
