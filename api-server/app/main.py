@@ -19,6 +19,57 @@ app = FastAPI(title="Vision Analytics API")
 templates = Jinja2Templates(directory="app/templates")
 scheduler = AsyncIOScheduler()
 
+def _day_key(prefix: str) -> str:
+    # today in server’s local time; change to UTC if you prefer
+    from time import localtime, strftime
+    return f"{prefix}:{strftime('%Y-%m-%d', localtime())}"
+
+def _parse_int(x) -> int:
+    if x is None: return 0
+    if isinstance(x, (bytes, bytearray)): 
+        try: return int(x.decode())
+        except: return 0
+    try: return int(x)
+    except: return 0
+
+
+async def kpi_poller(r: redis.Redis):
+    """Poll daily KPI counters from Redis and merge into realtime_state."""
+    print("Starting KPI poller...")
+    while True:
+        try:
+            # keys for today
+            k_vis  = _day_key("visitors:count")
+            k_e2q  = _day_key("conv:entry_to_queue")
+            k_q2h  = _day_key("conv:queue_to_hall")
+            k_ent  = _day_key("entry_count")
+            k_qent = _day_key("queue_entries")
+
+            # fetch
+            vis, e2q, q2h, ent, qent = await r.mget(k_vis, k_e2q, k_q2h, k_ent, k_qent)
+
+            vis  = _parse_int(vis)
+            e2q  = _parse_int(e2q)
+            q2h  = _parse_int(q2h)
+            ent  = _parse_int(ent)
+            qent = _parse_int(qent)
+
+            # safe denominators
+            e2q_rate = (e2q / ent) if ent > 0 else 0.0
+            q2h_rate = (q2h / qent) if qent > 0 else 0.0
+
+            # store in realtime_state
+            realtime_state["kpis"] = {
+                "unique_visitors": vis,
+                "entry_to_queue": {"num": e2q, "den": ent, "rate": e2q_rate},
+                "queue_to_hall":  {"num": q2h, "den": qent, "rate": q2h_rate},
+            }
+        except Exception as e:
+            print(f"KPI poller error: {e}")
+
+        await asyncio.sleep(2)  # update every 2s
+
+
 async def data_listener(r: redis.Redis):
     """Listens for occupancy data and aggregates it for the live dashboard."""
     pubsub = r.pubsub()
@@ -86,6 +137,7 @@ async def startup_event():
     
     r = redis.from_url(f"redis://{os.getenv('REDIS_HOST')}")
     asyncio.create_task(data_listener(r))
+    asyncio.create_task(kpi_poller(r))
     asyncio.create_task(db_writer_listener("vision-zone-change-events", models.TransitionEvent, r))
     asyncio.create_task(db_writer_listener("vision-alert-events", models.AlertLog, r))
     asyncio.create_task(log_metrics_periodically())
@@ -109,9 +161,16 @@ async def stream_metrics(request: Request):
     return EventSourceResponse(event_generator())
 
 @app.get("/reports/latest")
-async def get_latest_report():
+async def get_latest_report_meta():
     reports_dir = "reports"
     if not os.path.exists(reports_dir) or not os.listdir(reports_dir):
-        return {"error": "No reports generated yet."}
-    latest_report = sorted(os.listdir(reports_dir), reverse=True)[0]
-    return FileResponse(path=os.path.join(reports_dir, latest_report), media_type='text/csv', filename=latest_report)
+        return {"error": "Отчётов пока нет."}
+    latest = sorted(os.listdir(reports_dir), reverse=True)[0]
+    return {"latest_report_filename": latest}
+
+@app.get("/reports/download/{filename}")
+async def download_report(filename: str):
+    path = os.path.join("reports", filename)
+    if not os.path.exists(path):
+        return {"error": "Файл не найден."}
+    return FileResponse(path=path, media_type="text/csv", filename=filename)

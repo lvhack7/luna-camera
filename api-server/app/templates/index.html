@@ -1,146 +1,154 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Real-Time Cafe Analytics</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
-        h1, h2 { color: #444; }
-        .container { max-width: 1200px; margin: auto; }
-        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
-        .metric-card { background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 20px; }
-        .metric-card h2 { margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 10px; }
-        .metric-card ul { list-style-type: none; padding: 0; }
-        .metric-card li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
-        .metric-card li:last-child { border-bottom: none; }
-        .metric-card .value { font-weight: bold; font-size: 1.2em; color: #007bff; }
-        #total-occupancy .value { font-size: 2em; color: #dc3545; }
-        .status-dot { height: 12px; width: 12px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 8px; transition: background-color 0.5s ease; }
-        .status-dot.connected { background-color: #28a745; }
-        .status-dot.disconnected { background-color: #dc3545; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Аналитика кафе — в реальном времени</title>
+  <style>
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:#f4f4f9; color:#333; margin:0; padding:20px; }
+    h1,h2 { color:#444; }
+    .container { max-width:1200px; margin:auto; }
+    .metrics-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); gap:20px; }
+    .metric-card { background:#fff; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,.1); padding:20px; }
+    .metric-card h2 { margin-top:0; border-bottom:1px solid #eee; padding-bottom:10px; }
+    .metric-card ul { list-style:none; padding:0; margin:0; }
+    .metric-card li { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f0f0f0; }
+    .metric-card li:last-child{ border-bottom:none; }
+    .value { font-weight:700; font-size:1.2em; color:#007bff; }
+    #total-occupancy .value { font-size:2em; color:#dc3545; }
+    .status-dot{ height:12px; width:12px; background:#bbb; border-radius:50%; display:inline-block; margin-right:8px; transition:background-color .5s ease; }
+    .status-dot.connected{ background:#28a745; }
+    .status-dot.disconnected{ background:#dc3545; }
+    .muted { color:#777; font-size:.9em; }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <h1><span id="status-indicator" class="status-dot"></span>Real-Time Cafe Analytics</h1>
-        
-        <div class="metrics-grid">
-            <div id="total-occupancy" class="metric-card">
-                <h2>Total Occupancy (Non-Barista)</h2>
-                <ul>
-                    <li>
-                        <span>Current Guests:</span>
-                        <span id="total-count" class="value">--</span>
-                    </li>
-                </ul>
-            </div>
+  <div class="container">
+    <h1><span id="status-indicator" class="status-dot"></span>Аналитика кафе (онлайн)</h1>
 
-            <div id="barista-status" class="metric-card">
-                <h2>Barista Status</h2>
-                <ul>
-                    <li>
-                        <span>Staff Present:</span>
-                        <span id="barista-count" class="value">--</span>
-                    </li>
-                </ul>
-            </div>
+    <div class="metrics-grid">
+      <div id="total-occupancy" class="metric-card">
+        <h2>Посетители в зале (без бариста)</h2>
+        <ul>
+          <li><span>Сейчас в кафе:</span><span id="total-count" class="value">--</span></li>
+        </ul>
+      </div>
 
-            <div id="zone-counts" class="metric-card">
-                <h2>Consolidated Zone Counts</h2>
-                <ul id="zone-list">
-                    <!-- Zone data will be dynamically inserted here -->
-                </ul>
-            </div>
-        </div>
+      <div id="barista-status" class="metric-card">
+        <h2>Бариста</h2>
+        <ul>
+          <li><span>На месте:</span><span id="barista-count" class="value">--</span></li>
+        </ul>
+      </div>
 
-        <div class="reports-section metric-card" style="margin-top: 20px;">
-            <h2>Daily Reports</h2>
-            <p>Reports are generated daily at 01:05 UTC.</p>
-            <button id="download-btn">Download Latest Report</button>
-            <p id="report-status" style="margin-top: 10px; font-style: italic;"></p>
-        </div>
+      <div id="zone-counts" class="metric-card">
+        <h2>Зоны (сводно)</h2>
+        <ul id="zone-list"></ul>
+      </div>
+
+      <div id="conversions" class="metric-card">
+        <h2>Конверсия</h2>
+        <ul>
+          <li>
+            <span>Вход → Очередь:</span>
+            <span class="value"><span id="e2q-rate">--%</span> <span class="muted">(<span id="e2q-num">0</span>/<span id="e2q-den">0</span>)</span></span>
+          </li>
+          <li>
+            <span>Очередь → Зал:</span>
+            <span class="value"><span id="q2h-rate">--%</span> <span class="muted">(<span id="q2h-num">0</span>/<span id="q2h-den">0</span>)</span></span>
+          </li>
+        </ul>
+      </div>
+
+      <div id="visitors" class="metric-card">
+        <h2>Уникальные посетители (сегодня)</h2>
+        <ul>
+          <li><span>Количество:</span><span id="uniq-visitors" class="value">--</span></li>
+        </ul>
+      </div>
     </div>
 
-<script>
-    // This is where our real-time JavaScript will go
-    const totalCountElem = document.getElementById('total-count');
-    const baristaCountElem = document.getElementById('barista-count');
-    const zoneListElem = document.getElementById('zone-list');
+    <div class="reports-section metric-card" style="margin-top:20px;">
+      <h2>Отчёты</h2>
+      <p>Ежедневная генерация: 01:05 UTC.</p>
+      <button id="download-btn">Скачать последний отчёт</button>
+      <p id="report-status" class="muted" style="margin-top:10px;"></p>
+    </div>
+  </div>
+
+  <script>
+    const totalCountElem  = document.getElementById('total-count');
+    const baristaCountElem= document.getElementById('barista-count');
+    const zoneListElem    = document.getElementById('zone-list');
     const statusIndicator = document.getElementById('status-indicator');
 
-    console.log("Connecting to data stream...");
+    const e2qRate = document.getElementById('e2q-rate');
+    const e2qNum  = document.getElementById('e2q-num');
+    const e2qDen  = document.getElementById('e2q-den');
+    const q2hRate = document.getElementById('q2h-rate');
+    const q2hNum  = document.getElementById('q2h-num');
+    const q2hDen  = document.getElementById('q2h-den');
+    const uniqVisitors = document.getElementById('uniq-visitors');
 
-    // Create a connection to our Server-Sent Events endpoint
-    const eventSource = new EventSource("/stream/metrics");
+    const fmtPct = x => (x*100).toFixed(0) + '%';
 
-    eventSource.onopen = function() {
-        console.log("Connection to stream opened.");
-        statusIndicator.classList.remove('disconnected');
-        statusIndicator.classList.add('connected');
+    const es = new EventSource("/stream/metrics");
+    es.onopen = () => { statusIndicator.classList.add('connected'); statusIndicator.classList.remove('disconnected'); };
+    es.onerror= () => { statusIndicator.classList.remove('connected'); statusIndicator.classList.add('disconnected'); };
+
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      // Total occupancy (exclude barista)
+      totalCountElem.textContent = data.total_occupancy ?? '--';
+
+      // Barista
+      const bc = (data.consolidated_counts?.barista) || 0;
+      baristaCountElem.textContent = bc > 0 ? 'Да' : 'Нет';
+      baristaCountElem.style.color = bc > 0 ? '#28a745' : '#dc3545';
+
+      // Zones list
+      zoneListElem.innerHTML = '';
+      if (data.consolidated_counts) {
+        Object.entries(data.consolidated_counts).forEach(([zone, count]) => {
+          const li = document.createElement('li');
+          const title = zone.replace('_', ' ');
+          li.innerHTML = `<span>${title}:</span><span class="value">${count}</span>`;
+          zoneListElem.appendChild(li);
+        });
+      }
+
+      // KPIs
+      const k = data.kpis || {};
+      uniqVisitors.textContent = (k.unique_visitors ?? 0);
+
+      const e2q = k.entry_to_queue || {};
+      e2qNum.textContent = e2q.num ?? 0;
+      e2qDen.textContent = e2q.den ?? 0;
+      e2qRate.textContent= (e2q.den > 0) ? fmtPct(e2q.rate || 0) : '--%';
+
+      const q2h = k.queue_to_hall || {};
+      q2hNum.textContent = q2h.num ?? 0;
+      q2hDen.textContent = q2h.den ?? 0;
+      q2hRate.textContent= (q2h.den > 0) ? fmtPct(q2h.rate || 0) : '--%';
     };
 
-    // This event is fired every time the server sends a message
-    eventSource.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        console.log("Received data:", data);
-
-        // Update Total Occupancy
-        totalCountElem.textContent = data.total_occupancy;
-
-        // Update Barista Status
-        const baristaCount = data.consolidated_counts.barista || 0;
-        baristaCountElem.textContent = baristaCount > 0 ? "Yes" : "No";
-        baristaCountElem.style.color = baristaCount > 0 ? '#28a745' : '#dc3545';
-        
-        // Update Zone List
-        zoneListElem.innerHTML = ''; // Clear previous list
-        for (const [zone, count] of Object.entries(data.consolidated_counts)) {
-            const listItem = document.createElement('li');
-            listItem.innerHTML = `<span>${zone.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}:</span> <span class="value">${count}</span>`;
-            zoneListElem.appendChild(listItem);
-        }
-    };
-
-    eventSource.onerror = function(err) {
-        console.error("EventSource failed:", err);
-        statusIndicator.classList.remove('connected');
-        statusIndicator.classList.add('disconnected');
-        totalCountElem.textContent = 'Error';
-        // The browser will automatically try to reconnect
-    };
-
-    const downloadBtn = document.getElementById('download-btn');
+    // Reports
+    const btn = document.getElementById('download-btn');
     const reportStatus = document.getElementById('report-status');
-
-    downloadBtn.addEventListener('click', async () => {
-        reportStatus.textContent = 'Fetching latest report info...';
-        try {
-            // 1. Ask the API for the name of the latest report
-            const response = await fetch('/reports/latest');
-            const data = await response.json();
-
-            if (data.error) {
-                reportStatus.textContent = data.error;
-                return;
-            }
-            
-            const filename = data.latest_report_filename;
-            reportStatus.textContent = `Downloading ${filename}...`;
-
-            // 2. Trigger the download in the browser
-            window.location.href = `/reports/download/${filename}`;
-            
-            setTimeout(() => {
-                reportStatus.textContent = ''; // Clear status after a few seconds
-            }, 3000);
-
-        } catch (error) {
-            console.error('Failed to download report:', error);
-            reportStatus.textContent = 'Error downloading report. See console for details.';
-        }
+    btn.addEventListener('click', async () => {
+      reportStatus.textContent = 'Запрашиваем последний отчёт...';
+      try {
+        const meta = await fetch('/reports/latest').then(r => r.json());
+        if (meta.error) { reportStatus.textContent = meta.error; return; }
+        reportStatus.textContent = 'Скачиваем: ' + meta.latest_report_filename;
+        window.location.href = '/reports/download/' + encodeURIComponent(meta.latest_report_filename);
+        setTimeout(() => reportStatus.textContent = '', 3000);
+      } catch (e) {
+        console.error(e);
+        reportStatus.textContent = 'Ошибка загрузки отчёта.';
+      }
     });
-
-</script>
+  </script>
 </body>
 </html>
