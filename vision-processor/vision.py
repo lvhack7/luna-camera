@@ -25,8 +25,8 @@ IOU_NMS          = float(os.getenv("IOU_NMS", 0.30))
 CONFIRM_THRESH   = float(os.getenv("CONFIRM_THRESH", 0.30))
 KEEP_THRESH      = float(os.getenv("KEEP_THRESH", 0.15))
 
-ENTER_SECONDS    = float(os.getenv("ENTER_SECONDS", 0.8))
-EXIT_SECONDS     = float(os.getenv("EXIT_SECONDS", 2.5))
+ENTER_SECONDS    = float(os.getenv("ENTER_SECONDS", 0.8))   # hysteresis enter
+EXIT_SECONDS     = float(os.getenv("EXIT_SECONDS", 2.5))    # hysteresis exit
 MIN_AGE_FRAMES   = int(os.getenv("MIN_AGE_FRAMES", 5))
 COAST_FRAMES     = int(os.getenv("COAST_FRAMES", 60))
 GRAY_STD_THRESH  = float(os.getenv("GRAY_STD_THRESH", 10.0))
@@ -38,12 +38,14 @@ PICKUP_TO_EXIT_S  = int(os.getenv("PICKUP_TO_EXIT_S", 900))
 
 # Unique guests: count when dwell in ORDER ≥ 10s
 MIN_ORDER_DWELL_S = int(os.getenv("MIN_ORDER_DWELL_S", 10))
-UNIQUE_COOLDOWN_S = int(os.getenv("UNIQUE_COOLDOWN_S", 1200))
-UNIQUE_ASSOC_DIST = int(os.getenv("UNIQUE_ASSOC_DIST", 220))
 
-# Association to bridge ID switches
-MAX_ASSOC_DIST    = int(os.getenv("MAX_ASSOC_DIST", 220))      # px
-PICKUP_DWELL_S    = float(os.getenv("PICKUP_DWELL_S", 1.0))    # sec dwell in pickup
+# Association / dwell
+MAX_ASSOC_DIST    = int(os.getenv("MAX_ASSOC_DIST", 220))     # px for ID-bridge
+PICKUP_DWELL_S    = float(os.getenv("PICKUP_DWELL_S", 3.0))   # require ≥3s in pickup
+
+# Unique guest cross-ID dedupe (re-entries)
+UNIQUE_COOLDOWN_S = int(os.getenv("UNIQUE_COOLDOWN_S", 1200)) # 20 min
+UNIQUE_ASSOC_DIST = int(os.getenv("UNIQUE_ASSOC_DIST", 220))   # px
 
 # Redis / channels
 REDIS_HOST       = os.getenv("REDIS_HOST", "redis")
@@ -110,11 +112,11 @@ def process_camera(camera_id: str, config: dict):
     track_confirmed: Dict[int, bool] = {}
     zone_state = defaultdict(lambda: defaultdict(lambda: {"first_in": None, "last_in": None, "is_member": False}))
 
-    # Journey + association buffers (201 conversions)
+    # Journey + association buffers (for camera_201 conversions)
     journey: Dict[int, dict] = defaultdict(dict)
-    recent_unique = deque(maxlen=2000)
     recent_orders:  deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
     recent_pickups: deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
+    recent_unique:  deque = deque(maxlen=2000)   # {"ts","cx","cy"}
     last_center: Dict[int, Tuple[int,int]] = {}
 
     rtsp_url = os.getenv(config.get("rtsp_url_env", ""), "")
@@ -156,17 +158,6 @@ def process_camera(camera_id: str, config: dict):
         ax, ay = a; bx, by = b
         dx = ax - bx; dy = ay - by
         return (dx*dx + dy*dy)**0.5
-    
-    def exists_close(buf: deque, ts: float, center: tuple[int,int], window_s: int, dist_px: int) -> bool:
-        if not center: 
-            return False
-        cx, cy = center
-        for ev in reversed(buf):
-            if ts - ev["ts"] > window_s:
-                break
-            if _euclid((cx, cy), (ev["cx"], ev["cy"])) <= dist_px:
-                return True
-        return False
 
     def match_from_buffer(buf: deque, ts: float, center: Tuple[int,int], window_s: int) -> Optional[dict]:
         best, best_d = None, 1e9
@@ -180,6 +171,14 @@ def process_camera(camera_id: str, config: dict):
             best["used"] = True
             return best
         return None
+
+    def exists_close(buf: deque, ts: float, center: Tuple[int,int], window_s: int, dist_px: int) -> bool:
+        if not center: return False
+        for ev in reversed(buf):
+            if ts - ev["ts"] > window_s: break
+            if _euclid(center, (ev["cx"], ev["cy"])) <= dist_px:
+                return True
+        return False
 
     while True:
         frame = cap.read(); now = time.time()
@@ -219,7 +218,7 @@ def process_camera(camera_id: str, config: dict):
 
         stable = tracks[np.array(stable_idx, dtype=int)] if stable_idx else sv.Detections.empty()
 
-        # Centers for the stable detections
+        # Centers for stable detections
         centers: List[Tuple[int,int]] = []
         if len(stable) > 0 and stable.tracker_id is not None:
             for i in range(len(stable)):
@@ -228,13 +227,13 @@ def process_camera(camera_id: str, config: dict):
                 centers.append((cx, cy))
                 last_center[int(stable.tracker_id[i])] = (cx, cy)
 
-        # Zone masks (anchor is NOT passed; zone itself uses CENTER)
+        # Zone masks (no anchor passed; zone uses CENTER)
         zone_masks: List[np.ndarray] = [np.array([], dtype=bool) for _ in zones]
         if len(stable) > 0 and stable.tracker_id is not None:
             for i, zone in enumerate(zones):
                 zone_masks[i] = zone.trigger(detections=stable)
 
-        # Enter/exit events with hysteresis
+        # Enter/exit events (hysteresis)
         enter_events: List[Tuple[str, int, float, Optional[Tuple[int,int]]]] = []
         if len(stable) > 0 and stable.tracker_id is not None:
             for di in range(len(stable)):
@@ -260,57 +259,41 @@ def process_camera(camera_id: str, config: dict):
                                 "timestamp": now, "camera_id": camera_id, "tracker_id": tid, "event":"exit", "zone": zname
                             }))
 
-        # ================== UNIQUE GUESTS: dwell in ORDER ≥ MIN_ORDER_DWELL_S ==================
+        # ===== UNIQUE GUESTS: dwell in ORDER ≥ MIN_ORDER_DWELL_S with cross-ID dedupe =====
         if camera_id == "camera_201":
             k_unique = day_key("unique_guests")
             ttl = seconds_until_midnight()
-
             for tid, per_poly in zone_state.items():
-                order_idxs = [i for i, n in enumerate(names_lc) if n == "order"]
-                if not order_idxs:
-                    continue
-
-                in_order = False
-                first_in = None
+                order_idxs = [i for i,n in enumerate(names_lc) if n == "order"]
+                if not order_idxs: continue
+                in_order = False; first_in = None
                 for oi in order_idxs:
                     st = per_poly.get(oi)
                     if st and st["is_member"] and st["first_in"] is not None:
                         in_order = True
-                        # take the earliest “in” time across order polys
                         first_in = first_in if first_in is not None else st["first_in"]
-
-                if not in_order or first_in is None:
-                    continue
+                if not in_order or first_in is None: continue
 
                 dwell = now - first_in
-                if dwell < MIN_ORDER_DWELL_S:
-                    continue
+                if dwell < MIN_ORDER_DWELL_S: continue
 
                 j = journey[tid]
-                if j.get("unique_counted"):
-                    continue  # already counted for this tid today
+                if j.get("unique_counted"): continue
 
-                # Track-ID dedupe (cheap)
                 ded = day_key(f"seen:unique_guest:{camera_id}:{tid}")
                 already_tid = not r.set(ded, "1", ex=ttl, nx=True)
 
-                # Cross-ID dedupe by time+distance (handles re-entry / ID switch)
                 center_now = last_center.get(int(tid))
-                already_nearby = exists_close(
-                    recent_unique, now, center_now, UNIQUE_COOLDOWN_S, UNIQUE_ASSOC_DIST
-                )
+                already_nearby = exists_close(recent_unique, now, center_now, UNIQUE_COOLDOWN_S, UNIQUE_ASSOC_DIST)
 
                 if not (already_tid or already_nearby):
-                    r.incr(k_unique)
-                    r.expire(k_unique, ttl)
+                    r.incr(k_unique); r.expire(k_unique, ttl)
                     log(f"[{camera_id}] UNIQUE ++ tid={tid} dwell={dwell:.1f}s")
-                    # remember this unique to block re-counts for a while
                     if center_now:
                         recent_unique.append({"ts": now, "cx": center_now[0], "cy": center_now[1]})
-
                 j["unique_counted"] = True
-                
-        # ================== CONVERSIONS with ID bridging (camera_201) ==================
+
+        # ===== CONVERSIONS with ID bridging & pickup dwell gate (camera_201) =====
         if camera_id == "camera_201" and enter_events:
             k_conv_o2p      = day_key("conv:order_to_pickup")
             k_conv_p2h      = day_key("conv:pickup_to_hall")
@@ -318,21 +301,18 @@ def process_camera(camera_id: str, config: dict):
             k_sum_o2p       = day_key("sum:o2p_s");  k_cnt_o2p = day_key("cnt:o2p")
             k_sum_p2h       = day_key("sum:p2h_s");  k_cnt_p2h = day_key("cnt:p2h")
             k_sum_p2e       = day_key("sum:p2e_s");  k_cnt_p2e = day_key("cnt:p2e")
+            k_pickup_valid  = day_key("pickup_valid")   # denominator for %s
             ttl = seconds_until_midnight()
 
-            # Stage A: cache raw order enters; note pickup enters start dwell clock
+            # Stage A: cache raw order enters
             for zname, tid, ts, center in enter_events:
                 j = journey.setdefault(tid, {})
                 if zname == "order":
                     recent_orders.append({"ts": ts, "cx": (center or (0,0))[0], "cy": (center or (0,0))[1], "used": False})
-                    j.setdefault("order_enter_ts", ts)
-                    j["last_ts"] = ts
-                elif zname == "pickup":
-                    j.setdefault("pickup_seen", True)  # flag (optional)
+                    j.setdefault("order_enter_ts", ts); j["last_ts"] = ts
 
-            # Stage B: when dwell in pickup is enough, emit order→pickup & buffer a pickup point
+            # Stage B: when pickup dwell ≥ PICKUP_DWELL_S, count pickup_valid once and emit order→pickup
             for tid_k, per_poly in zone_state.items():
-                # is in pickup?
                 in_pick = False; first_in = None
                 for pi, nm in enumerate(names_lc):
                     if nm != "pickup": continue
@@ -348,9 +328,15 @@ def process_camera(camera_id: str, config: dict):
                     continue
 
                 j = journey.setdefault(tid_k, {})
+
+                # Denominator: count each track once when they meet dwell
+                if not j.get("pickup_valid_counted"):
+                    r.incr(k_pickup_valid); r.expire(k_pickup_valid, ttl)
+                    j["pickup_valid_counted"] = True
+
+                # order→pickup once (same ID first, then bridge)
                 if not j.get("counted_o2p"):
                     dt = None
-                    # try same tid
                     if "order_enter_ts" in j:
                         dt = now - j["order_enter_ts"]
                         if 0 <= dt <= ORDER_TO_PICKUP_S:
@@ -358,7 +344,6 @@ def process_camera(camera_id: str, config: dict):
                             r.incrbyfloat(k_sum_o2p, float(dt)); r.incr(k_cnt_o2p)
                             r.expire(k_sum_o2p, ttl); r.expire(k_cnt_o2p, ttl)
                             j["counted_o2p"] = True
-                    # bridge ID using nearest recent order
                     if not j.get("counted_o2p"):
                         cnow = last_center.get(int(tid_k))
                         ev = match_from_buffer(recent_orders, now, cnow, ORDER_TO_PICKUP_S)
@@ -369,14 +354,14 @@ def process_camera(camera_id: str, config: dict):
                             r.expire(k_sum_o2p, ttl); r.expire(k_cnt_o2p, ttl)
                             j["counted_o2p"] = True
 
-                # buffer pickup event once (for next hops)
+                # buffer pickup point for next hops
                 c = last_center.get(int(tid_k))
                 if c and not any((now - ev["ts"] < 2 and _euclid((ev["cx"],ev["cy"]), c) < 20) for ev in recent_pickups):
                     recent_pickups.append({"ts": now, "cx": c[0], "cy": c[1], "used": False})
 
-            # Stage C: on hall/exit enters, match a recent pickup
+            # Stage C: on hall/exit enters, match recent pickup within window
             for zname, tid, ts, center in enter_events:
-                if zname in ("hall1", "hall2"):
+                if zname in ("hall1","hall2"):
                     ev = match_from_buffer(recent_pickups, ts, center, PICKUP_TO_HALL_S)
                     if ev:
                         dt = ts - ev["ts"]
@@ -391,7 +376,7 @@ def process_camera(camera_id: str, config: dict):
                         r.incrbyfloat(k_sum_p2e, float(dt)); r.incr(k_cnt_p2e)
                         r.expire(k_sum_p2e, ttl); r.expire(k_cnt_p2e, ttl)
 
-        # ================== LIVE OCCUPANCY ==================
+        # ===== LIVE OCCUPANCY (for dashboard) =====
         def count_group(label: str) -> int:
             idxs = [i for i,n in enumerate(names_lc) if n == label]
             if not idxs: return 0
