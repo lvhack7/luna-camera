@@ -15,13 +15,14 @@ from queue import Queue, Empty
 ALMATY_TZ        = ZoneInfo("Asia/Almaty")
 OPEN_T           = dtime(8, 30)
 CLOSE_T          = dtime(23, 59, 59)
+
 MODEL_NAME       = os.getenv("MODEL_NAME", "yolo11l.pt")
+IMG_SIZE         = int(os.getenv("IMG_SIZE", 1280))
 
 CONF_DETECT_LOW  = float(os.getenv("CONF_DETECT_LOW", 0.10))
 IOU_NMS          = float(os.getenv("IOU_NMS", 0.30))
 CONFIRM_THRESH   = float(os.getenv("CONFIRM_THRESH", 0.30))
 KEEP_THRESH      = float(os.getenv("KEEP_THRESH", 0.15))
-IMG_SIZE         = int(os.getenv("IMG_SIZE", 1280))
 
 ENTER_SECONDS    = float(os.getenv("ENTER_SECONDS", 0.8))
 EXIT_SECONDS     = float(os.getenv("EXIT_SECONDS", 2.5))
@@ -29,24 +30,25 @@ MIN_AGE_FRAMES   = int(os.getenv("MIN_AGE_FRAMES", 5))
 COAST_FRAMES     = int(os.getenv("COAST_FRAMES", 60))
 GRAY_STD_THRESH  = float(os.getenv("GRAY_STD_THRESH", 10.0))
 
+# Conversions (seconds)
+ORDER_TO_PICKUP_S = int(os.getenv("ORDER_TO_PICKUP_S", 900))
+PICKUP_TO_HALL_S  = int(os.getenv("PICKUP_TO_HALL_S", 900))
+PICKUP_TO_EXIT_S  = int(os.getenv("PICKUP_TO_EXIT_S", 900))
+
+# Unique guests: door → order dwell
+MIN_ORDER_DWELL_S = int(os.getenv("MIN_ORDER_DWELL_S", 10))
+EXIT_TO_ORDER_S   = int(os.getenv("EXIT_TO_ORDER_S", 180))
+
+# Redis / channels
 REDIS_HOST       = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT       = int(os.getenv("REDIS_PORT", 6379))
 DATA_CHANNEL     = "vision-data-events"
 ZONE_CHANGE_CH   = "vision-zone-change-events"
 ALERT_CHANNEL    = "vision-alert-events"
 
-# Conversions (seconds)
-ORDER_TO_PICKUP_S = int(os.getenv("ORDER_TO_PICKUP_S", 900))
-PICKUP_TO_HALL_S  = int(os.getenv("PICKUP_TO_HALL_S", 900))
-PICKUP_TO_EXIT_S  = int(os.getenv("PICKUP_TO_EXIT_S", 900))
-
-# Unique visitors from exit->queue window (seconds)
-EXIT_TO_QUEUE_S   = int(os.getenv("EXIT_TO_QUEUE_S", 90))
-
 DEBUG = os.getenv("VP_DEBUG", "0") == "1"
-
-def log(*args, **kw):
-    if DEBUG: print(*args, **kw, flush=True)
+def log(*a, **kw):
+    if DEBUG: print(*a, **kw, flush=True)
 
 def day_key(prefix: str, dt: datetime | None = None) -> str:
     if dt is None: dt = datetime.now(ALMATY_TZ)
@@ -88,9 +90,17 @@ def is_corrupted(frame: np.ndarray) -> bool:
 
 # ==================== PER-CAMERA WORKER ====================
 def process_camera(camera_id: str, config: dict):
+    # Track-level state
     track_confirmed: Dict[int, bool] = {}
-    # per-track, per-polygon state: timers + membership
+    # Per-track/per-polygon membership timers & flags
     zone_state = defaultdict(lambda: defaultdict(lambda: {"first_in": None, "last_in": None, "is_member": False}))
+    # Journey state (camera_201 conversions & uniques)
+    journey: Dict[int, dict] = defaultdict(dict)
+
+    # Door alias
+    def is_door(name: str) -> bool:
+        n = name.lower()
+        return n in ("exit", "entry", "door")
 
     rtsp_url = os.getenv(config.get("rtsp_url_env", ""), "")
     if not rtsp_url:
@@ -111,26 +121,7 @@ def process_camera(camera_id: str, config: dict):
     zones_cfg = config["zones"]
     names     = [z["name"] for z in zones_cfg]
     names_lc  = [n.lower() for n in names]
-    # IMPORTANT: no unsupported args; set anchor when calling trigger()
-    zones     = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=(1920, 1080), triggering_position=sv.Position.CENTER) for z in zones_cfg]
-
-    # Index helpers
-    def idxs(label): return [i for i, n in enumerate(names_lc) if n == label]
-    idx_hall   = idxs("hall")
-    idx_queue  = idxs("queue")
-    idx_order  = idxs("order")
-    idx_pickup = idxs("pickup")
-    idx_hall1  = idxs("hall1")
-    idx_hall2  = idxs("hall2")
-    idx_exit   = idxs("exit")
-    idx_barista= idxs("barista")
-
-    # Journey state (only used on 201)
-    journey: Dict[int, dict] = defaultdict(dict)
-
-    # For unique guests based on exit->queue recency
-    # Keep a small zset of recent 'exit' enters on cam_201
-    z_exit_recent = day_key("buf:exit_recent")
+    zones     = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_reolution_wh=(1920, 1080), triggering_position=sv.Position.CENTER) for z in zones_cfg]
 
     last_barista_seen = time.time()
     alert_sent = False
@@ -140,7 +131,7 @@ def process_camera(camera_id: str, config: dict):
     age_frames: Dict[int, int]  = defaultdict(int)
     miss_frames: Dict[int, int] = defaultdict(int)
 
-    print(f"[{camera_id}] Zones: {names}", flush=True)
+    log(f"[{camera_id}] Zones: {names}")
 
     while True:
         frame = cap.read(); now = time.time()
@@ -186,7 +177,7 @@ def process_camera(camera_id: str, config: dict):
             for i, zone in enumerate(zones):
                 zone_masks[i] = zone.trigger(detections=stable)
 
-        # Enter/exit detection with hysteresis
+        # Enter/exit with hysteresis
         enter_events: List[tuple] = []  # (zone_name_lower, tracker_id, ts)
         if len(stable) > 0 and stable.tracker_id is not None:
             for di in range(len(stable)):
@@ -212,81 +203,79 @@ def process_camera(camera_id: str, config: dict):
                                 "timestamp": now, "camera_id": camera_id, "tracker_id": tid, "event": "exit", "zone": zname
                             }))
 
-        # ================== CONVERSIONS & UNIQUES (camera_201) ==================
+        # ================== CONVERSIONS & JOURNEY (camera_201) ==================
         if camera_id == "camera_201" and enter_events:
-            k_order_unique  = day_key("order_unique")
-            k_pickup_unique = day_key("pickup_unique")
+            # Daily keys
             k_conv_o2p      = day_key("conv:order_to_pickup")
             k_conv_p2h      = day_key("conv:pickup_to_hall")
             k_conv_p2e      = day_key("conv:pickup_to_exit")
             k_sum_o2p       = day_key("sum:o2p_s");  k_cnt_o2p = day_key("cnt:o2p")
             k_sum_p2h       = day_key("sum:p2h_s");  k_cnt_p2h = day_key("cnt:p2h")
             k_sum_p2e       = day_key("sum:p2e_s");  k_cnt_p2e = day_key("cnt:p2e")
-
-            # We also count unique guests at first QUEUE entry on camera_201
-            k_unique_guests = day_key("unique_guests")
+            ttl = seconds_until_midnight()
 
             for zname, tid, ts in enter_events:
                 j = journey[tid]
-
-                # Track recent EXIT enters to correlate exit->queue (for unique guest confidence)
-                if zname == "exit":
-                    r.zadd(z_exit_recent, {f"{camera_id}:{tid}:{int(ts)}": ts})
-                    r.expire(z_exit_recent, seconds_until_midnight())
-
-                # ----- UNIQUE GUESTS on first queue entry (per day, de-duped) -----
-                if zname == "queue":
-                    ded = day_key(f"seen:unique_queue:{camera_id}:{tid}")
-                    added = r.set(ded, "1", ex=seconds_until_midnight(), nx=True)
-                    if added:
-                        # If this queue entry is soon after an exit entry, we treat confidently as a new arrival.
-                        recent_exit = r.zrangebyscore(z_exit_recent, ts - EXIT_TO_QUEUE_S, ts, start=0, num=1)
-                        if recent_exit:
-                            r.incr(k_unique_guests)
-                        else:
-                            # even without a recent EXIT, count unique by first queue enter (your request)
-                            r.incr(k_unique_guests)
-                        r.expire(k_unique_guests, seconds_until_midnight())
-
-                # ----- ORDER uniques & O→P conversion -----
-                if zname == "order":
-                    ded = day_key(f"seen:order:{camera_id}:{tid}")
-                    if r.set(ded, "1", ex=seconds_until_midnight(), nx=True):
-                        r.incr(k_order_unique); r.expire(k_order_unique, seconds_until_midnight())
+                if is_door(zname):
+                    j["last_exit_ts"] = ts
+                elif zname == "order":
                     j.setdefault("order_enter_ts", ts); j["last_ts"] = ts
-
                 elif zname == "pickup":
-                    ded = day_key(f"seen:pickup:{camera_id}:{tid}")
-                    if r.set(ded, "1", ex=seconds_until_midnight(), nx=True):
-                        r.incr(k_pickup_unique); r.expire(k_pickup_unique, seconds_until_midnight())
                     if "order_enter_ts" in j and not j.get("counted_o2p"):
                         dt = ts - j["order_enter_ts"]
                         if 0 <= dt <= ORDER_TO_PICKUP_S:
-                            r.incr(k_conv_o2p); r.expire(k_conv_o2p, seconds_until_midnight())
-                            r.incrbyfloat(k_sum_o2p, float(dt))
-                            r.incr(k_cnt_o2p)
-                            r.expire(k_sum_o2p, seconds_until_midnight()); r.expire(k_cnt_o2p, seconds_until_midnight())
+                            r.incr(k_conv_o2p); r.expire(k_conv_o2p, ttl)
+                            r.incrbyfloat(k_sum_o2p, float(dt)); r.incr(k_cnt_o2p)
+                            r.expire(k_sum_o2p, ttl); r.expire(k_cnt_o2p, ttl)
                             j["counted_o2p"] = True
                     j.setdefault("pickup_enter_ts", ts); j["done_after_pickup"] = False; j["last_ts"] = ts
-
-                # ----- P→H and P→E branching -----
-                elif zname in ("hall1", "hall2"):
+                elif zname in ("hall1","hall2"):
                     if "pickup_enter_ts" in j and not j.get("done_after_pickup"):
                         dt = ts - j["pickup_enter_ts"]
                         if 0 <= dt <= PICKUP_TO_HALL_S:
-                            r.incr(k_conv_p2h); r.expire(k_conv_p2h, seconds_until_midnight())
+                            r.incr(k_conv_p2h); r.expire(k_conv_p2h, ttl)
                             r.incrbyfloat(k_sum_p2h, float(dt)); r.incr(k_cnt_p2h)
-                            r.expire(k_sum_p2h, seconds_until_midnight()); r.expire(k_cnt_p2h, seconds_until_midnight())
+                            r.expire(k_sum_p2h, ttl); r.expire(k_cnt_p2h, ttl)
                         j["done_after_pickup"] = True
-
                 elif zname == "exit":
                     if "pickup_enter_ts" in j and not j.get("done_after_pickup"):
                         dt = ts - j["pickup_enter_ts"]
                         if 0 <= dt <= PICKUP_TO_EXIT_S:
-                            r.incr(k_conv_p2e); r.expire(k_conv_p2e, seconds_until_midnight())
+                            r.incr(k_conv_p2e); r.expire(k_conv_p2e, ttl)
                             r.incrbyfloat(k_sum_p2e, float(dt)); r.incr(k_cnt_p2e)
-                            r.expire(k_sum_p2e, seconds_until_midnight()); r.expire(k_cnt_p2e, seconds_until_midnight())
+                            r.expire(k_sum_p2e, ttl); r.expire(k_cnt_p2e, ttl)
                         j["done_after_pickup"] = True
+
+        # ================== UNIQUE GUESTS: door → order with dwell ≥ N ==================
+        if camera_id == "camera_201":
+            k_unique = day_key("unique_guests")
+            ttl = seconds_until_midnight()
+            for tid, per_poly in zone_state.items():
+                # Check current membership & dwell in 'order'
+                order_idxs = [i for i,n in enumerate(names_lc) if n == "order"]
+                if not order_idxs: break
+
+                in_order = False; dwell = 0.0; first_in_ts = None
+                for oi in order_idxs:
+                    st = per_poly.get(oi)
+                    if st and st["is_member"] and st["first_in"] is not None:
+                        in_order = True
+                        first_in_ts = st["first_in"]
+                        dwell = max(dwell, now - st["first_in"])
+                if not in_order: continue
+
+                j = journey[tid]
+                if j.get("unique_counted"): continue
+
+                order_enter_ts = j.get("order_enter_ts", first_in_ts or now)
+                last_exit_ts   = j.get("last_exit_ts")
+                came_from_door = last_exit_ts is not None and 0 <= (order_enter_ts - last_exit_ts) <= EXIT_TO_ORDER_S
+
+                if dwell >= MIN_ORDER_DWELL_S and came_from_door:
+                    ded = day_key(f"seen:unique_guest:{camera_id}:{tid}")
+                    if r.set(ded, "1", ex=ttl, nx=True):
+                        r.incr(k_unique); r.expire(k_unique, ttl)
+                    j["unique_counted"] = True
 
         # ================== LIVE OCCUPANCY ==================
         def count_group(label: str) -> int:
@@ -343,11 +332,9 @@ def spawn_all(full_cfg: dict) -> list[Process]:
 
 def kill_all(procs: list[Process]):
     for p in procs:
-        if p.is_alive():
-            p.terminate()
+        if p.is_alive(): p.terminate()
     for p in procs:
-        if p.is_alive():
-            p.join(timeout=5)
+        if p.is_alive(): p.join(timeout=5)
     print("[scheduler] all workers stopped")
 
 if __name__ == "__main__":

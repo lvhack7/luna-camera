@@ -17,7 +17,6 @@
     .ok { color:#2e7d32; font-weight:700; }
     .bad { color:#c62828; font-weight:700; }
     button { padding:10px 14px; border:0; background:#0b6bcb; color:#fff; border-radius:8px; cursor:pointer; }
-    button:disabled { opacity:.6; cursor:default; }
     .status { display:inline-block; width:10px; height:10px; border-radius:50%; background:#999; margin-right:8px; vertical-align:middle; }
     .status.on { background:#2ecc71; }
   </style>
@@ -38,9 +37,7 @@
 
     <div class="card">
       <h3 style="margin:0 0 8px">Уникальные гости (сегодня)</h3>
-      <div class="row"><span class="k">Уникальные гости</span><span id="unique" class="v">—</span></div>
-      <div class="row"><span class="k">У кассы (order)</span><span id="orderU" class="v">—</span></div>
-      <div class="row"><span class="k">У выдачи (pickup)</span><span id="pickupU" class="v">—</span></div>
+      <div class="row"><span class="k">Всего уникальных гостей</span><span id="unique" class="v">—</span></div>
     </div>
 
     <div class="card">
@@ -66,9 +63,6 @@
     const zones = document.getElementById('zones');
 
     const uniqueEl = document.getElementById('unique');
-    const orderU = document.getElementById('orderU');
-    const pickupU = document.getElementById('pickupU');
-
     const o2pC = document.getElementById('o2pC'); const o2pA = document.getElementById('o2pA');
     const p2hC = document.getElementById('p2hC'); const p2hA = document.getElementById('p2hA');
     const p2eC = document.getElementById('p2eC'); const p2eA = document.getElementById('p2eA');
@@ -97,15 +91,9 @@
 
       const k = data.kpis || {};
       uniqueEl.textContent = k.unique_guests ?? '—';
-      orderU.textContent = k.order_unique ?? '—';
-      pickupU.textContent = k.pickup_unique ?? '—';
-
-      o2pC.textContent = k.o2p?.count ?? '—';
-      o2pA.textContent = k.o2p?.avg_s ?? '—';
-      p2hC.textContent = k.p2h?.count ?? '—';
-      p2hA.textContent = k.p2h?.avg_s ?? '—';
-      p2eC.textContent = k.p2e?.count ?? '—';
-      p2eA.textContent = k.p2e?.avg_s ?? '—';
+      o2pC.textContent = k.o2p?.count ?? '—'; o2pA.textContent = k.o2p?.avg_s ?? '—';
+      p2hC.textContent = k.p2h?.count ?? '—'; p2hA.textContent = k.p2h?.avg_s ?? '—';
+      p2eC.textContent = k.p2e?.count ?? '—'; p2eA.textContent = k.p2e?.avg_s ?? '—';
       alerts.textContent = k.barista_alerts ?? '—';
     };
 

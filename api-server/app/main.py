@@ -23,15 +23,12 @@ app = FastAPI(title="Vision Analytics API")
 templates = Jinja2Templates(directory="app/templates")
 scheduler = AsyncIOScheduler()
 
-# Live state (what the SSE sends to the web UI)
 realtime_state = {
-    "consolidated_counts": defaultdict(int),  # hall/queue/barista across cameras
-    "total_occupancy": 0,                      # non-barista
+    "consolidated_counts": defaultdict(int),
+    "total_occupancy": 0,
     "per_camera_data": {},
-    "kpis": {                                  # updated every second from Redis + DB
+    "kpis": {
         "unique_guests": 0,
-        "order_unique": 0,
-        "pickup_unique": 0,
         "o2p": {"count": 0, "avg_s": 0.0},
         "p2h": {"count": 0, "avg_s": 0.0},
         "p2e": {"count": 0, "avg_s": 0.0},
@@ -40,8 +37,7 @@ realtime_state = {
 }
 
 def day_str(dt: datetime | None = None) -> str:
-    if dt is None:
-        dt = datetime.now(ALMATY)
+    if dt is None: dt = datetime.now(ALMATY)
     return dt.strftime("%Y-%m-%d")
 
 def redis_key(prefix: str, dt: datetime | None = None) -> str:
@@ -54,9 +50,6 @@ def today_bounds_almaty():
     return start, end
 
 async def data_listener(r: redis.Redis):
-    """
-    Listens for occupancy payloads and aggregates them for the live dashboard.
-    """
     pubsub = r.pubsub()
     await pubsub.subscribe("vision-data-events")
     print("[api] Listening for vision-data-events…")
@@ -67,35 +60,22 @@ async def data_listener(r: redis.Redis):
                 data = json.loads(msg["data"])
                 realtime_state["per_camera_data"][data["camera_id"]] = data
 
-                # Merge occupancies across cams
                 consolidated = defaultdict(int)
                 for cam_data in realtime_state["per_camera_data"].values():
                     for zone, count in cam_data.get("zone_counts", {}).items():
                         consolidated[zone] += count
 
                 realtime_state["consolidated_counts"] = consolidated
-                # Total occupancy = everyone except barista
-                realtime_state["total_occupancy"] = sum(
-                    v for k, v in consolidated.items() if k != "barista"
-                )
+                realtime_state["total_occupancy"] = sum(v for k,v in consolidated.items() if k != "barista")
             await asyncio.sleep(0.01)
         except Exception as e:
-            print(f"[api] data_listener error: {e}")
-            await asyncio.sleep(2)
+            print(f"[api] data_listener error: {e}"); await asyncio.sleep(2)
 
 async def poll_kpis(r: redis.Redis):
-    """
-    Every second, read today's counters from Redis + DB and update realtime_state['kpis'].
-    """
     print("[api] KPI poller started")
     while True:
         try:
-            # --- Redis daily counters (set by vision-processor) ---
-            # These keys are YYYY-MM-DD scoped and expire after midnight.
             k_unique = redis_key("unique_guests")
-            k_ord    = redis_key("order_unique")
-            k_pu     = redis_key("pickup_unique")
-
             k_o2p    = redis_key("conv:order_to_pickup")
             k_p2h    = redis_key("conv:pickup_to_hall")
             k_p2e    = redis_key("conv:pickup_to_exit")
@@ -104,31 +84,20 @@ async def poll_kpis(r: redis.Redis):
             k_sum_p2h = redis_key("sum:p2h_s"); k_cnt_p2h = redis_key("cnt:p2h")
             k_sum_p2e = redis_key("sum:p2e_s"); k_cnt_p2e = redis_key("cnt:p2e")
 
-            # Pipeline for performance
             pipe = r.pipeline()
-            for k in [k_unique, k_ord, k_pu, k_o2p, k_p2h, k_p2e,
-                      k_sum_o2p, k_cnt_o2p, k_sum_p2h, k_cnt_p2h, k_sum_p2e, k_cnt_p2e]:
+            for k in [k_unique, k_o2p, k_p2h, k_p2e, k_sum_o2p, k_cnt_o2p, k_sum_p2h, k_cnt_p2h, k_sum_p2e, k_cnt_p2e]:
                 pipe.get(k)
             vals = await pipe.execute()
-            (v_unique, v_ord, v_pu, v_o2p, v_p2h, v_p2e,
-             sum_o2p, cnt_o2p, sum_p2h, cnt_p2h, sum_p2e, cnt_p2e) = vals
+            (v_unique, v_o2p, v_p2h, v_p2e, sum_o2p, cnt_o2p, sum_p2h, cnt_p2h, sum_p2e, cnt_p2e) = vals
 
-            def to_int(x):  return int(x) if x is not None else 0
-            def to_float(x): 
-                try: return float(x)
-                except: return 0.0
+            to_int   = lambda x: int(x) if x is not None else 0
+            to_float = lambda x: float(x) if x is not None else 0.0
 
             unique_guests = to_int(v_unique)
-            order_unique  = to_int(v_ord)
-            pickup_unique = to_int(v_pu)
+            o2p_count = to_int(v_o2p); o2p_avg = to_float(sum_o2p)/max(1,to_int(cnt_o2p))
+            p2h_count = to_int(v_p2h); p2h_avg = to_float(sum_p2h)/max(1,to_int(cnt_p2h))
+            p2e_count = to_int(v_p2e); p2e_avg = to_float(sum_p2e)/max(1,to_int(cnt_p2e))
 
-            o2p_count = to_int(v_o2p); o2p_avg = (to_float(sum_o2p)/max(1,to_int(cnt_o2p)))
-            p2h_count = to_int(v_p2h); p2h_avg = (to_float(sum_p2h)/max(1,to_int(cnt_p2h)))
-            p2e_count = to_int(v_p2e); p2e_avg = (to_float(sum_p2e)/max(1,to_int(cnt_p2e)))
-
-            # --- Barista alerts from DB (today) ---
-            # Note: alerts also live in DB via listener; query DB every ~5s to avoid heavy load
-            # We keep a simple 5-sec throttle using asyncio.sleep at the end.
             start, end = today_bounds_almaty()
             async with AsyncSessionLocal() as sess:
                 q = select(func.count(models.AlertLog.id)).where(
@@ -141,22 +110,16 @@ async def poll_kpis(r: redis.Redis):
 
             realtime_state["kpis"] = {
                 "unique_guests": unique_guests,
-                "order_unique":  order_unique,
-                "pickup_unique": pickup_unique,
-                "o2p": {"count": o2p_count, "avg_s": round(o2p_avg, 1)},
-                "p2h": {"count": p2h_count, "avg_s": round(p2h_avg, 1)},
-                "p2e": {"count": p2e_count, "avg_s": round(p2e_avg, 1)},
+                "o2p": {"count": o2p_count, "avg_s": round(o2p_avg,1)},
+                "p2h": {"count": p2h_count, "avg_s": round(p2h_avg,1)},
+                "p2e": {"count": p2e_count, "avg_s": round(p2e_avg,1)},
                 "barista_alerts": barista_alerts
             }
-            await asyncio.sleep(5)  # poll KPIs every 5s
-        except Exception as e:
-            print(f"[api] KPI poller error: {e}")
             await asyncio.sleep(5)
+        except Exception as e:
+            print(f"[api] KPI poller error: {e}"); await asyncio.sleep(5)
 
 async def db_listener(channel_name, model_class, r: redis.Redis):
-    """
-    Generic listener to persist events/alerts to DB.
-    """
     pubsub = r.pubsub()
     await pubsub.subscribe(channel_name)
     print(f"[api] Listening for {channel_name} → DB")
@@ -164,12 +127,10 @@ async def db_listener(channel_name, model_class, r: redis.Redis):
         try:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if not message:
-                await asyncio.sleep(0.1)
-                continue
+                await asyncio.sleep(0.1); continue
             data = json.loads(message["data"])
             async with AsyncSessionLocal() as session:
                 async with session.begin():
-                    # Store the raw event
                     db_log = model_class(**data)
                     session.add(db_log)
         except Exception as e:
@@ -178,24 +139,19 @@ async def db_listener(channel_name, model_class, r: redis.Redis):
 
 @app.on_event("startup")
 async def startup_event():
-    # Create tables if not using Alembic (keep if you don’t have migrations)
     async with async_engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
 
     r = redis.from_url(f"redis://{os.getenv('REDIS_HOST','redis')}:6379/0")
-    # Live listeners
     asyncio.create_task(data_listener(r))
     asyncio.create_task(db_listener("vision-zone-change-events", models.TransitionEvent, r))
     asyncio.create_task(db_listener("vision-alert-events",       models.AlertLog,        r))
     asyncio.create_task(poll_kpis(r))
 
-    # Schedule daily CSV at 00:05 Asia/Almaty for the day that just ended
-    scheduler.add_job(
-        reporting.generate_daily_report,
-        trigger=CronTrigger(hour=0, minute=5, timezone=ALMATY),
-        id="daily_report_job",
-        replace_existing=True
-    )
+    # generate previous-day CSV at 00:05 ALMT
+    scheduler.add_job(reporting.generate_daily_report,
+                      trigger=CronTrigger(hour=0, minute=5, timezone=ALMATY),
+                      id="daily_report_job", replace_existing=True)
     scheduler.start()
     print("[api] Startup complete.")
 
@@ -207,24 +163,20 @@ async def dashboard(request: Request):
 async def stream_metrics(request: Request):
     async def event_generator():
         while True:
-            if await request.is_disconnected():
-                break
+            if await request.is_disconnected(): break
             yield {"event": "message", "data": json.dumps(realtime_state, default=str)}
             await asyncio.sleep(1)
     return EventSourceResponse(event_generator())
 
-# Reports: latest & direct download
 @app.get("/reports/latest")
 async def get_latest_report():
     reports_dir = "app/reports"
-    if not os.path.exists(reports_dir):
-        os.makedirs(reports_dir, exist_ok=True)
+    os.makedirs(reports_dir, exist_ok=True)
     files = [f for f in os.listdir(reports_dir) if f.endswith(".csv")]
     if not files:
         return {"error": "Нет доступных отчётов."}
     files.sort(reverse=True)
-    latest = files[0]
-    return {"latest_report_filename": latest}
+    return {"latest_report_filename": files[0]}
 
 @app.get("/reports/download/{filename}")
 async def download_report(filename: str):

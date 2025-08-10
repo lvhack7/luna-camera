@@ -1,6 +1,5 @@
-# app/reporting.py
-import os, csv, asyncio
-from datetime import datetime, timedelta
+import os, csv
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, func
 
@@ -13,24 +12,18 @@ ALMATY = ZoneInfo("Asia/Almaty")
 def dstr(dt: datetime): return dt.strftime("%Y-%m-%d")
 
 async def _read_day_redis(r: redis.Redis, day: datetime):
-    """
-    Read all counters for `day` from Redis (they expire after the next midnight).
-    This runs at 00:05 local, so yesterday’s keys still exist.
-    """
     key = lambda k: f"{k}:{dstr(day)}"
-    pipe = r.pipeline()
     wants = [
         "unique_guests",
-        "order_unique", "pickup_unique",
         "conv:order_to_pickup", "conv:pickup_to_hall", "conv:pickup_to_exit",
         "sum:o2p_s","cnt:o2p", "sum:p2h_s","cnt:p2h", "sum:p2e_s","cnt:p2e"
     ]
-    for k in wants:
-        pipe.get(key(k))
+    pipe = r.pipeline()
+    for k in wants: pipe.get(key(k))
     vals = await pipe.execute()
     m = dict(zip(wants, vals))
 
-    def to_i(x): return int(x) if x is not None else 0
+    to_i = lambda x: int(x) if x is not None else 0
     def to_f(x):
         try: return float(x)
         except: return 0.0
@@ -41,29 +34,21 @@ async def _read_day_redis(r: redis.Redis, day: datetime):
 
     return {
         "unique_guests": to_i(m["unique_guests"]),
-        "order_unique":  to_i(m["order_unique"]),
-        "pickup_unique": to_i(m["pickup_unique"]),
         "o2p": {"count": to_i(m["conv:order_to_pickup"]), "avg_s": round(o2p_avg,1)},
         "p2h": {"count": to_i(m["conv:pickup_to_hall"]),  "avg_s": round(p2h_avg,1)},
         "p2e": {"count": to_i(m["conv:pickup_to_exit"]),  "avg_s": round(p2e_avg,1)},
     }
 
 async def generate_daily_report():
-    """
-    Generate CSV for the day that just ended (08:30–24:00 ALMT).
-    """
-    # Determine 'yesterday' day window (since we run at 00:05)
     now = datetime.now(ALMATY)
     day = now - timedelta(days=1)
 
-    day_start = datetime.combine(day.date(), models.time(8,30), tzinfo=ALMATY)
-    day_end   = datetime.combine(day.date(), models.time(23,59,59), tzinfo=ALMATY)
+    day_start = datetime.combine(day.date(), dtime(8,30), tzinfo=ALMATY)
+    day_end   = datetime.combine(day.date(), dtime(23,59,59), tzinfo=ALMATY)
 
-    # Redis read
     r = redis.from_url(f"redis://{os.getenv('REDIS_HOST','redis')}:6379/0")
     kpis = await _read_day_redis(r, day)
 
-    # Peak occupancy from DB logs
     async with AsyncSessionLocal() as sess:
         q = select(models.OccupancyLog.ts, models.OccupancyLog.total_occupancy).where(
             models.OccupancyLog.ts >= day_start,
@@ -74,7 +59,6 @@ async def generate_daily_report():
         if (row := res.first()):
             peak_ts, peak_occ = row[0], row[1]
 
-        # Barista alerts count
         q2 = select(func.count(models.AlertLog.id)).where(
             models.AlertLog.timestamp >= day_start.timestamp(),
             models.AlertLog.timestamp <= day_end.timestamp(),
@@ -83,7 +67,6 @@ async def generate_daily_report():
         res2 = await sess.execute(q2)
         barista_alerts = int(res2.scalar_one())
 
-    # Write CSV
     reports_dir = "app/reports"
     os.makedirs(reports_dir, exist_ok=True)
     fname = f"report_{dstr(day)}.csv"
@@ -96,8 +79,6 @@ async def generate_daily_report():
         w.writerow(["Время пика (ALMT)", peak_ts.isoformat() if peak_ts else "—"])
         w.writerow([])
         w.writerow(["Уникальные гости (всего за день)", kpis["unique_guests"]])
-        w.writerow(["Посетители у кассы (order_unique)", kpis["order_unique"]])
-        w.writerow(["Посетители у выдачи (pickup_unique)", kpis["pickup_unique"]])
         w.writerow([])
         w.writerow(["Конверсия", "Количество", "Среднее время, сек"])
         w.writerow(["Order → Pickup", kpis["o2p"]["count"], kpis["o2p"]["avg_s"]])
