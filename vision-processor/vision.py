@@ -38,6 +38,8 @@ PICKUP_TO_EXIT_S  = int(os.getenv("PICKUP_TO_EXIT_S", 900))
 
 # Unique guests: count when dwell in ORDER ≥ 10s
 MIN_ORDER_DWELL_S = int(os.getenv("MIN_ORDER_DWELL_S", 10))
+UNIQUE_COOLDOWN_S = int(os.getenv("UNIQUE_COOLDOWN_S", 1200))
+UNIQUE_ASSOC_DIST = int(os.getenv("UNIQUE_ASSOC_DIST", 220))
 
 # Association to bridge ID switches
 MAX_ASSOC_DIST    = int(os.getenv("MAX_ASSOC_DIST", 220))      # px
@@ -110,6 +112,7 @@ def process_camera(camera_id: str, config: dict):
 
     # Journey + association buffers (201 conversions)
     journey: Dict[int, dict] = defaultdict(dict)
+    recent_unique = deque(maxlen=2000)
     recent_orders:  deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
     recent_pickups: deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
     last_center: Dict[int, Tuple[int,int]] = {}
@@ -153,6 +156,17 @@ def process_camera(camera_id: str, config: dict):
         ax, ay = a; bx, by = b
         dx = ax - bx; dy = ay - by
         return (dx*dx + dy*dy)**0.5
+    
+    def exists_close(buf: deque, ts: float, center: tuple[int,int], window_s: int, dist_px: int) -> bool:
+        if not center: 
+            return False
+        cx, cy = center
+        for ev in reversed(buf):
+            if ts - ev["ts"] > window_s:
+                break
+            if _euclid((cx, cy), (ev["cx"], ev["cy"])) <= dist_px:
+                return True
+        return False
 
     def match_from_buffer(buf: deque, ts: float, center: Tuple[int,int], window_s: int) -> Optional[dict]:
         best, best_d = None, 1e9
@@ -250,26 +264,52 @@ def process_camera(camera_id: str, config: dict):
         if camera_id == "camera_201":
             k_unique = day_key("unique_guests")
             ttl = seconds_until_midnight()
+
             for tid, per_poly in zone_state.items():
-                order_idxs = [i for i,n in enumerate(names_lc) if n == "order"]
+                order_idxs = [i for i, n in enumerate(names_lc) if n == "order"]
                 if not order_idxs:
                     continue
-                in_order = False; dwell = 0.0
+
+                in_order = False
+                first_in = None
                 for oi in order_idxs:
                     st = per_poly.get(oi)
                     if st and st["is_member"] and st["first_in"] is not None:
                         in_order = True
-                        dwell = max(dwell, now - st["first_in"])
-                if not in_order: continue
-                j = journey[tid]
-                if j.get("unique_counted"): continue
-                if dwell >= MIN_ORDER_DWELL_S:
-                    ded = day_key(f"seen:unique_guest:{camera_id}:{tid}")
-                    if r.set(ded, "1", ex=ttl, nx=True):
-                        r.incr(k_unique); r.expire(k_unique, ttl)
-                        log(f"[{camera_id}] UNIQUE ++ tid={tid} dwell={dwell:.1f}s")
-                    j["unique_counted"] = True
+                        # take the earliest “in” time across order polys
+                        first_in = first_in if first_in is not None else st["first_in"]
 
+                if not in_order or first_in is None:
+                    continue
+
+                dwell = now - first_in
+                if dwell < MIN_ORDER_DWELL_S:
+                    continue
+
+                j = journey[tid]
+                if j.get("unique_counted"):
+                    continue  # already counted for this tid today
+
+                # Track-ID dedupe (cheap)
+                ded = day_key(f"seen:unique_guest:{camera_id}:{tid}")
+                already_tid = not r.set(ded, "1", ex=ttl, nx=True)
+
+                # Cross-ID dedupe by time+distance (handles re-entry / ID switch)
+                center_now = last_center.get(int(tid))
+                already_nearby = exists_close(
+                    recent_unique, now, center_now, UNIQUE_COOLDOWN_S, UNIQUE_ASSOC_DIST
+                )
+
+                if not (already_tid or already_nearby):
+                    r.incr(k_unique)
+                    r.expire(k_unique, ttl)
+                    log(f"[{camera_id}] UNIQUE ++ tid={tid} dwell={dwell:.1f}s")
+                    # remember this unique to block re-counts for a while
+                    if center_now:
+                        recent_unique.append({"ts": now, "cx": center_now[0], "cy": center_now[1]})
+
+                j["unique_counted"] = True
+                
         # ================== CONVERSIONS with ID bridging (camera_201) ==================
         if camera_id == "camera_201" and enter_events:
             k_conv_o2p      = day_key("conv:order_to_pickup")
