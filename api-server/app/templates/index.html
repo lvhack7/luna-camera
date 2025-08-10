@@ -4,35 +4,206 @@
   <meta charset="UTF-8" />
   <title>Панель аналитики: Кафе</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <!-- Иконки Font Awesome для современного вида -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" integrity="sha512-z3gLpd7yknf1YoNbCzqRKc4qyor8gaKU1qmn+CShxbuBusANI9QpRohGBreCFkKxLhei6S9CQXFEbbKuqLg0DA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
   <style>
-    /* … всё как у вас … (без изменений стилей) … */
-    :root { /* … */ }
-    html { scroll-behavior: smooth; }
-    body { /* … */ }
-    @keyframes pulse { /* … */ }
-    .header { /* … */ }
-    .grid { /* … */ }
-    .card { /* … */ }
-    .card:hover { /* … */ }
-    .card-header { /* … */ }
-    .card-header .fa-solid { /* … */ }
-    .data-row { /* … */ }
-    .data-row:last-child { border-bottom: none; }
-    .key { color: var(--text-secondary); font-size: 0.9rem; }
-    .value { font-family: var(--font-family-mono); font-weight: 600; font-size: 2.25rem; color: var(--color-primary); }
-    #total .value { color: var(--color-danger); }
-    .value-group { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-    .value-group .value { font-size: 1.5rem; }
-    .value-group .key { font-size: 0.8rem; }
+    /*
+      =====================================================
+      Свежий и современный дизайн для панели аналитики
+      - Использование CSS-переменных для легкой смены темы
+      - Фокус на читаемости, пространстве и визуальной иерархии
+      - Адаптивность для мобильных устройств
+    */
+    
+    :root {
+      --bg-color: #f4f7fe;
+      --card-bg: #ffffff;
+      --text-primary: #1a202c;
+      --text-secondary: #6c757d;
+      --border-color: #e2e8f0;
+      --shadow-color: rgba(149, 157, 165, 0.1);
+      
+      --color-primary: #4f46e5;
+      --color-primary-dark: #4338ca;
+      --color-success: #16a34a;
+      --color-danger: #dc2626;
+      --color-warning: #f59e0b;
+      
+      --font-family-sans: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-family-mono: 'Roboto Mono', 'SF Mono', 'Fira Code', 'Source Code Pro', Menlo, Monaco, Consolas, monospace;
+      
+      --border-radius: 1rem; /* 16px */
+      --card-padding: 1.5rem; /* 24px */
+      --grid-gap: 1.5rem; /* 24px */
+    }
+
+    /* Плавный скролл и улучшенное сглаживание шрифтов */
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: var(--font-family-sans);
+      background-color: var(--bg-color);
+      margin: 0;
+      padding: var(--grid-gap);
+      color: var(--text-primary);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    
+    /* Анимация пульсации для индикатора "в сети" */
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7); }
+      70% { box-shadow: 0 0 0 10px rgba(22, 163, 74, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 24px;
+    }
+    
+    .header h1 {
+      margin: 0;
+      font-size: 1.75rem;
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      /* Адаптивная сетка: карточки переносятся в новый ряд, если не хватает места */
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: var(--grid-gap);
+    }
+    
+    .card {
+      background: var(--card-bg);
+      border-radius: var(--border-radius);
+      padding: var(--card-padding);
+      box-shadow: 0 8px 24px var(--shadow-color);
+      border: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 28px var(--shadow-color);
+    }
+    
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 0 0 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .card-header .fa-solid {
+      color: var(--color-primary);
+      font-size: 1.2rem;
+    }
+    
+    .data-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.75rem 0; /* 12px */
+      border-bottom: 1px solid #f1f5f9;
+      min-height: 58px;
+    }
+    
+    .data-row:last-child {
+      border-bottom: none;
+    }
+    
+    .key { /* Ключ (название метрики) */
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    
+    .value { /* Значение (число) */
+      font-family: var(--font-family-mono);
+      font-weight: 600;
+      font-size: 2.25rem;
+      color: var(--color-primary);
+    }
+    
+    #total .value { /* Особый цвет для главной метрики */
+      color: var(--color-danger);
+    }
+    
+    .value-group { /* Группа для конверсий: число + среднее время */
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+    }
+    .value-group .value {
+        font-size: 1.5rem; /* Уменьшенный размер для конверсий */
+    }
+    .value-group .key {
+        font-size: 0.8rem;
+    }
+
     .status-ok { color: var(--color-success); }
     .status-danger { color: var(--color-danger); }
-    .action-button { /* … */ }
-    .action-button:hover:not(:disabled) { /* … */ }
-    .action-button:disabled { /* … */ }
-    .status-text { /* … */ }
-    .live-indicator { /* … */ }
-    .live-indicator.is-live { /* … */ }
+    
+    .action-button {
+      padding: 12px 18px;
+      border: none;
+      background: var(--color-primary);
+      color: #fff;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-family: var(--font-family-sans);
+      transition: background-color 0.2s ease, transform 0.1s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: auto; /* Прижимает кнопку к низу карточки */
+    }
+    
+    .action-button:hover:not(:disabled) {
+      background: var(--color-primary-dark);
+      transform: translateY(-2px);
+    }
+    
+    .action-button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    .status-text {
+      margin-top: 12px;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+      height: 1.2em; /* Резервируем место, чтобы layout не прыгал */
+      text-align: center;
+    }
+    
+    .live-indicator {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background-color: var(--text-secondary);
+      transition: background-color 0.3s ease;
+    }
+    
+    .live-indicator.is-live {
+      background-color: var(--color-success);
+      animation: pulse 2s infinite;
+    }
   </style>
 </head>
 <body>
@@ -42,7 +213,7 @@
   </header>
 
   <main class="grid">
-    <!-- ОБЩАЯ ЗАГРУЗКА -->
+    <!-- КАРТОЧКА: ОБЩАЯ ЗАГРУЗКА -->
     <div class="card" id="total">
       <h3 class="card-header"><i class="fa-solid fa-users"></i>Общая загрузка</h3>
       <div class="data-row">
@@ -55,22 +226,24 @@
       </div>
     </div>
 
-    <!-- ЗАГРУЗКА ПО ЗОНАМ -->
+    <!-- КАРТОЧКА: ЗАГРУЗКА ПО ЗОНАМ -->
     <div class="card">
       <h3 class="card-header"><i class="fa-solid fa-chart-pie"></i>Загрузка по зонам</h3>
-      <div id="zones"></div>
-    </div>
-
-    <!-- УНИКАЛЬНЫЕ ПОСЕТИТЕЛИ -->
-    <div class="card">
-      <h3 class="card-header"><i class="fa-solid fa-user-check"></i>Уникальные посетители (сегодня)</h3>
-      <div class="data-row">
-        <span class="key">Всего уникальных</span>
-        <span id="unique" class="value">—</span>
+      <div id="zones">
+        <!-- Данные по зонам будут вставлены динамически -->
       </div>
     </div>
 
-    <!-- КОНВЕРСИИ -->
+    <!-- КАРТОЧКА: УНИКАЛЬНЫЕ ПОСЕТИТЕЛИ -->
+    <div class="card">
+        <h3 class="card-header"><i class="fa-solid fa-user-check"></i>Уникальные посетители (сегодня)</h3>
+        <div class="data-row">
+            <span class="key">Всего уникальных</span>
+            <span id="unique" class="value">—</span>
+        </div>
+    </div>
+
+    <!-- КАРТОЧКА: КОНВЕРСИИ -->
     <div class="card">
       <h3 class="card-header"><i class="fa-solid fa-right-left"></i>Конверсии и метрики (сегодня)</h3>
 
@@ -110,37 +283,47 @@
       </div>
     </div>
 
-    <!-- ОТЧЁТЫ -->
+    <!-- КАРТОЧКА: ОТЧЁТЫ -->
     <div class="card">
       <h3 class="card-header"><i class="fa-solid fa-file-arrow-down"></i>Ежедневные отчёты</h3>
       <p style="color: var(--text-secondary); font-size: 0.9rem; line-height: 1.5; flex-grow: 1;">
-        Автоматический отчёт за день (08:30–24:00 ALMT) формируется в 23:59.
+        Автоматический отчёт за день (08:30–24:00 ALMT) формируется в 00:05.
       </p>
       <button id="dl" class="action-button">
-        <i class="fa-solid fa-download"></i> Скачать отчёт
+        <i class="fa-solid fa-download"></i>
+        Скачать отчёт
       </button>
       <div id="dlstatus" class="status-text"></div>
     </div>
   </main>
 
   <script>
+    // --- Получение элементов DOM ---
     const s = document.getElementById('s');
     const totalCount = document.getElementById('totalCount');
     const barista = document.getElementById('barista');
     const zones = document.getElementById('zones');
     const uniqueEl = document.getElementById('unique');
     const o2pC = document.getElementById('o2pC'); const o2pA = document.getElementById('o2pA');
-    const p2hC = document.getElementById('p2hC'); const p2hA = document.getElementById('p2hA'); const p2hPct = document.getElementById('p2hPct');
-    const p2eC = document.getElementById('p2eC'); const p2eA = document.getElementById('p2eA'); const p2ePct = document.getElementById('p2ePct');
+    const p2hC = document.getElementById('p2hC'); const p2hA = document.getElementById('p2hA');
+    const p2eC = document.getElementById('p2eC'); const p2eA = document.getElementById('p2eA');
     const alerts = document.getElementById('alerts');
     const dl = document.getElementById('dl');
     const dlstatus = document.getElementById('dlstatus');
 
+    // --- Карта для перевода названий зон на русский язык ---
     const zoneNamesRU = {
-      queue: 'Очередь', hall: 'Зал', order: 'У кассы', pickup: 'У выдачи',
-      hall1: 'Зал 1', hall2: 'Зал 2', exit: 'Выход', barista: 'Бариста'
+      queue: 'Очередь',
+      hall: 'Зал',
+      order: 'У кассы',
+      pickup: 'У выдачи',
+      hall1: 'Зал 1',
+      hall2: 'Зал 2',
+      exit: 'Выход',
+      barista: 'Бариста'
     };
-
+    
+    // --- Подключение к потоку данных (Server-Sent Events) ---
     const es = new EventSource('/stream/metrics');
     es.onopen = () => s.classList.add('is-live');
     es.onerror = () => s.classList.remove('is-live');
@@ -148,30 +331,31 @@
     es.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-
-        // Общая загрузка
+        
+        // Обновление общей загрузки
         totalCount.textContent = data.total_occupancy ?? '—';
         const isBaristaPresent = (data.consolidated_counts?.barista || 0) > 0;
         barista.textContent = isBaristaPresent ? 'Да' : 'Нет';
         barista.className = 'value ' + (isBaristaPresent ? 'status-ok' : 'status-danger');
 
-        // Зоны
+        // Динамическое обновление списка зон
         zones.innerHTML = '';
         const cc = data.consolidated_counts || {};
         for (const key in cc) {
+          // Игнорируем зону бариста, так как она уже показана в главной карточке
           if (key !== 'barista') {
             const div = document.createElement('div');
             div.className = 'data-row';
+            // Используем русское название из карты или оставляем оригинал
             const displayName = zoneNamesRU[key] || key;
             div.innerHTML = `<span class="key">${displayName}</span><span class="value" style="font-size: 1.75rem;">${cc[key]}</span>`;
             zones.appendChild(div);
           }
         }
 
-        // KPI + проценты
+        // Обновление KPI
         const k = data.kpis || {};
         uniqueEl.textContent = k.unique_guests ?? '—';
-
         o2pC.textContent = k.o2p?.count ?? '—';
         o2pA.textContent = k.o2p?.avg_s ?? '—';
 
@@ -182,26 +366,33 @@
         p2eC.textContent = k.p2e?.count ?? '—';
         p2eA.textContent = k.p2e?.avg_s ?? '—';
         p2ePct.textContent = (k.p2e?.pct ?? '—');
-
         alerts.textContent = k.barista_alerts ?? '—';
 
-      } catch (e) {
-        console.error("Ошибка парсинга данных с сервера:", e);
+      } catch (error) {
+        console.error("Ошибка парсинга данных с сервера:", error);
       }
     };
 
-    // Скачивание отчёта
+    // --- Логика скачивания отчёта ---
     dl.onclick = async () => {
       dl.disabled = true;
       dlstatus.textContent = 'Запрашиваю файл...';
       try {
         const response = await fetch('/reports/latest');
+        if (!response.ok) {
+          throw new Error(`Ошибка сети: ${response.status}`);
+        }
+        
         const data = await response.json();
-        if (data.error) { dlstatus.textContent = data.error; return; }
+        if (data.error) {
+          dlstatus.textContent = `Ошибка: ${data.error}`;
+          return; // Не сбрасываем disabled, чтобы пользователь видел ошибку
+        }
+        
         if (data.latest_report_filename) {
           dlstatus.textContent = 'Начинаю скачивание...';
           window.location.href = '/reports/download/' + data.latest_report_filename;
-          setTimeout(() => dlstatus.textContent = '', 4000);
+          setTimeout(() => { dlstatus.textContent = ''; }, 4000);
         } else {
           dlstatus.textContent = 'Отчёты не найдены.';
         }
@@ -209,7 +400,10 @@
         console.error('Ошибка скачивания:', e);
         dlstatus.textContent = 'Не удалось загрузить отчёт.';
       } finally {
-        setTimeout(() => { dl.disabled = false; }, 1000);
+        // Всегда включаем кнопку обратно, кроме случая с ошибкой от сервера
+        if (!dlstatus.textContent.startsWith('Ошибка:')) {
+            setTimeout(() => { dl.disabled = false; }, 1000);
+        }
       }
     };
   </script>
