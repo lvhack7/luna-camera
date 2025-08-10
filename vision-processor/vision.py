@@ -250,31 +250,38 @@ def process_camera(camera_id: str, config: dict):
         if camera_id == "camera_201":
             k_unique = day_key("unique_guests")
             ttl = seconds_until_midnight()
-            for tid, per_poly in zone_state.items():
-                # Check current membership & dwell in 'order'
-                order_idxs = [i for i,n in enumerate(names_lc) if n == "order"]
-                if not order_idxs: break
 
-                in_order = False; dwell = 0.0; first_in_ts = None
+            # For each active track, if it's been inside 'order' for >= MIN_ORDER_DWELL_S, count once per day
+            for tid, per_poly in zone_state.items():
+                # all 'order' polygons (usually one)
+                order_idxs = [i for i, n in enumerate(names_lc) if n == "order"]
+                if not order_idxs:
+                    continue
+
+                in_order = False
+                dwell = 0.0
+
+                # Compute dwell for this track in any 'order' polygon
                 for oi in order_idxs:
                     st = per_poly.get(oi)
                     if st and st["is_member"] and st["first_in"] is not None:
                         in_order = True
-                        first_in_ts = st["first_in"]
                         dwell = max(dwell, now - st["first_in"])
-                if not in_order: continue
+
+                if not in_order:
+                    continue
 
                 j = journey[tid]
-                if j.get("unique_counted"): continue
+                if j.get("unique_counted"):
+                    continue  # already counted today for this track
 
-                order_enter_ts = j.get("order_enter_ts", first_in_ts or now)
-                last_exit_ts   = j.get("last_exit_ts")
-                came_from_door = last_exit_ts is not None and 0 <= (order_enter_ts - last_exit_ts) <= EXIT_TO_ORDER_S
-
-                if dwell >= MIN_ORDER_DWELL_S and came_from_door:
+                if dwell >= MIN_ORDER_DWELL_S:
+                    # Per-day, per-track dedupe so we count once
                     ded = day_key(f"seen:unique_guest:{camera_id}:{tid}")
                     if r.set(ded, "1", ex=ttl, nx=True):
-                        r.incr(k_unique); r.expire(k_unique, ttl)
+                        r.incr(k_unique)
+                        r.expire(k_unique, ttl)
+                        log(f"[{camera_id}] UNIQUE ++ (tid={tid}) dwell={dwell:.1f}s in 'order'")
                     j["unique_counted"] = True
 
         # ================== LIVE OCCUPANCY ==================
