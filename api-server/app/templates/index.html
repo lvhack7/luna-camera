@@ -2,153 +2,129 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
+  <title>Аналитика кафе — реальное время</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Аналитика кафе — в реальном времени</title>
   <style>
-    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:#f4f4f9; color:#333; margin:0; padding:20px; }
-    h1,h2 { color:#444; }
-    .container { max-width:1200px; margin:auto; }
-    .metrics-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); gap:20px; }
-    .metric-card { background:#fff; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,.1); padding:20px; }
-    .metric-card h2 { margin-top:0; border-bottom:1px solid #eee; padding-bottom:10px; }
-    .metric-card ul { list-style:none; padding:0; margin:0; }
-    .metric-card li { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f0f0f0; }
-    .metric-card li:last-child{ border-bottom:none; }
-    .value { font-weight:700; font-size:1.2em; color:#007bff; }
-    #total-occupancy .value { font-size:2em; color:#dc3545; }
-    .status-dot{ height:12px; width:12px; background:#bbb; border-radius:50%; display:inline-block; margin-right:8px; transition:background-color .5s ease; }
-    .status-dot.connected{ background:#28a745; }
-    .status-dot.disconnected{ background:#dc3545; }
-    .muted { color:#777; font-size:.9em; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#f6f7fb; margin:0; padding:24px; color:#222; }
+    h1 { margin:0 0 16px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+    .card { background:#fff; border-radius:12px; padding:16px; box-shadow:0 2px 8px rgba(0,0,0,.06); }
+    .k { color:#666; }
+    .v { font-weight:700; font-size:1.6rem; color:#0b6bcb; }
+    #total .v { color:#c0392b; }
+    .row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #eee; }
+    .row:last-child { border-bottom:none; }
+    .ok { color:#2e7d32; font-weight:700; }
+    .bad { color:#c62828; font-weight:700; }
+    button { padding:10px 14px; border:0; background:#0b6bcb; color:#fff; border-radius:8px; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:default; }
+    .status { display:inline-block; width:10px; height:10px; border-radius:50%; background:#999; margin-right:8px; vertical-align:middle; }
+    .status.on { background:#2ecc71; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1><span id="status-indicator" class="status-dot"></span>Аналитика кафе (онлайн)</h1>
+  <h1><span id="s" class="status"></span>Аналитика кафе (реальное время)</h1>
 
-    <div class="metrics-grid">
-      <div id="total-occupancy" class="metric-card">
-        <h2>Посетители в зале (без бариста)</h2>
-        <ul>
-          <li><span>Сейчас в кафе:</span><span id="total-count" class="value">--</span></li>
-        </ul>
-      </div>
-
-      <div id="barista-status" class="metric-card">
-        <h2>Бариста</h2>
-        <ul>
-          <li><span>На месте:</span><span id="barista-count" class="value">--</span></li>
-        </ul>
-      </div>
-
-      <div id="zone-counts" class="metric-card">
-        <h2>Зоны (сводно)</h2>
-        <ul id="zone-list"></ul>
-      </div>
-
-      <div id="conversions" class="metric-card">
-        <h2>Конверсия</h2>
-        <ul>
-          <li>
-            <span>Вход → Очередь:</span>
-            <span class="value"><span id="e2q-rate">--%</span> <span class="muted">(<span id="e2q-num">0</span>/<span id="e2q-den">0</span>)</span></span>
-          </li>
-          <li>
-            <span>Очередь → Зал:</span>
-            <span class="value"><span id="q2h-rate">--%</span> <span class="muted">(<span id="q2h-num">0</span>/<span id="q2h-den">0</span>)</span></span>
-          </li>
-        </ul>
-      </div>
-
-      <div id="visitors" class="metric-card">
-        <h2>Уникальные посетители (сегодня)</h2>
-        <ul>
-          <li><span>Количество:</span><span id="uniq-visitors" class="value">--</span></li>
-        </ul>
-      </div>
+  <div class="grid">
+    <div class="card" id="total">
+      <div class="row"><span class="k">Гостей сейчас (без бариста)</span><span id="totalCount" class="v">—</span></div>
+      <div class="row"><span class="k">Бариста на месте</span><span id="barista" class="v">—</span></div>
     </div>
 
-    <div class="reports-section metric-card" style="margin-top:20px;">
-      <h2>Отчёты</h2>
-      <p>Ежедневная генерация: 01:05 UTC.</p>
-      <button id="download-btn">Скачать последний отчёт</button>
-      <p id="report-status" class="muted" style="margin-top:10px;"></p>
+    <div class="card">
+      <h3 style="margin:0 0 8px">Зоны (суммарно)</h3>
+      <div id="zones"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 8px">Уникальные гости (сегодня)</h3>
+      <div class="row"><span class="k">Уникальные гости</span><span id="unique" class="v">—</span></div>
+      <div class="row"><span class="k">У кассы (order)</span><span id="orderU" class="v">—</span></div>
+      <div class="row"><span class="k">У выдачи (pickup)</span><span id="pickupU" class="v">—</span></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 8px">Конверсии (сегодня)</h3>
+      <div class="row"><span class="k">Order → Pickup</span><span><span id="o2pC" class="v">—</span> <span class="k">(ср. <span id="o2pA">—</span> c)</span></span></div>
+      <div class="row"><span class="k">Pickup → Hall</span><span><span id="p2hC" class="v">—</span> <span class="k">(ср. <span id="p2hA">—</span> c)</span></span></div>
+      <div class="row"><span class="k">Pickup → Exit</span><span><span id="p2eC" class="v">—</span> <span class="k">(ср. <span id="p2eA">—</span> c)</span></span></div>
+      <div class="row"><span class="k">Оповещения (бариста)</span><span id="alerts" class="v">—</span></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 8px">Ежедневные отчёты</h3>
+      <p>Отчёт за день (08:30–24:00 ALMT) создаётся в 00:05.</p>
+      <button id="dl">Скачать последний отчёт</button>
+      <div id="dlstatus" style="margin-top:8px; color:#666"></div>
     </div>
   </div>
 
   <script>
-    const totalCountElem  = document.getElementById('total-count');
-    const baristaCountElem= document.getElementById('barista-count');
-    const zoneListElem    = document.getElementById('zone-list');
-    const statusIndicator = document.getElementById('status-indicator');
+    const s = document.getElementById('s');
+    const totalCount = document.getElementById('totalCount');
+    const barista = document.getElementById('barista');
+    const zones = document.getElementById('zones');
 
-    const e2qRate = document.getElementById('e2q-rate');
-    const e2qNum  = document.getElementById('e2q-num');
-    const e2qDen  = document.getElementById('e2q-den');
-    const q2hRate = document.getElementById('q2h-rate');
-    const q2hNum  = document.getElementById('q2h-num');
-    const q2hDen  = document.getElementById('q2h-den');
-    const uniqVisitors = document.getElementById('uniq-visitors');
+    const uniqueEl = document.getElementById('unique');
+    const orderU = document.getElementById('orderU');
+    const pickupU = document.getElementById('pickupU');
 
-    const fmtPct = x => (x*100).toFixed(0) + '%';
+    const o2pC = document.getElementById('o2pC'); const o2pA = document.getElementById('o2pA');
+    const p2hC = document.getElementById('p2hC'); const p2hA = document.getElementById('p2hA');
+    const p2eC = document.getElementById('p2eC'); const p2eA = document.getElementById('p2eA');
+    const alerts = document.getElementById('alerts');
 
-    const es = new EventSource("/stream/metrics");
-    es.onopen = () => { statusIndicator.classList.add('connected'); statusIndicator.classList.remove('disconnected'); };
-    es.onerror= () => { statusIndicator.classList.remove('connected'); statusIndicator.classList.add('disconnected'); };
+    const es = new EventSource('/stream/metrics');
+    es.onopen = () => { s.classList.add('on'); };
+    es.onerror = () => { s.classList.remove('on'); };
 
-    es.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    es.onmessage = (ev) => {
+      const data = JSON.parse(ev.data);
+      totalCount.textContent = data.total_occupancy ?? '—';
 
-      // Total occupancy (exclude barista)
-      totalCountElem.textContent = data.total_occupancy ?? '--';
+      const b = (data.consolidated_counts?.barista || 0) > 0;
+      barista.textContent = b ? 'Да' : 'Нет';
+      barista.className = 'v ' + (b ? 'ok' : 'bad');
 
-      // Barista
-      const bc = (data.consolidated_counts?.barista) || 0;
-      baristaCountElem.textContent = bc > 0 ? 'Да' : 'Нет';
-      baristaCountElem.style.color = bc > 0 ? '#28a745' : '#dc3545';
+      zones.innerHTML = '';
+      const cc = data.consolidated_counts || {};
+      Object.keys(cc).forEach(k => {
+        const div = document.createElement('div');
+        div.className = 'row';
+        div.innerHTML = `<span class="k">${k}</span><span class="v">${cc[k]}</span>`;
+        zones.appendChild(div);
+      });
 
-      // Zones list
-      zoneListElem.innerHTML = '';
-      if (data.consolidated_counts) {
-        Object.entries(data.consolidated_counts).forEach(([zone, count]) => {
-          const li = document.createElement('li');
-          const title = zone.replace('_', ' ');
-          li.innerHTML = `<span>${title}:</span><span class="value">${count}</span>`;
-          zoneListElem.appendChild(li);
-        });
-      }
-
-      // KPIs
       const k = data.kpis || {};
-      uniqVisitors.textContent = (k.unique_visitors ?? 0);
+      uniqueEl.textContent = k.unique_guests ?? '—';
+      orderU.textContent = k.order_unique ?? '—';
+      pickupU.textContent = k.pickup_unique ?? '—';
 
-      const e2q = k.entry_to_queue || {};
-      e2qNum.textContent = e2q.num ?? 0;
-      e2qDen.textContent = e2q.den ?? 0;
-      e2qRate.textContent= (e2q.den > 0) ? fmtPct(e2q.rate || 0) : '--%';
-
-      const q2h = k.queue_to_hall || {};
-      q2hNum.textContent = q2h.num ?? 0;
-      q2hDen.textContent = q2h.den ?? 0;
-      q2hRate.textContent= (q2h.den > 0) ? fmtPct(q2h.rate || 0) : '--%';
+      o2pC.textContent = k.o2p?.count ?? '—';
+      o2pA.textContent = k.o2p?.avg_s ?? '—';
+      p2hC.textContent = k.p2h?.count ?? '—';
+      p2hA.textContent = k.p2h?.avg_s ?? '—';
+      p2eC.textContent = k.p2e?.count ?? '—';
+      p2eA.textContent = k.p2e?.avg_s ?? '—';
+      alerts.textContent = k.barista_alerts ?? '—';
     };
 
-    // Reports
-    const btn = document.getElementById('download-btn');
-    const reportStatus = document.getElementById('report-status');
-    btn.addEventListener('click', async () => {
-      reportStatus.textContent = 'Запрашиваем последний отчёт...';
+    const dl = document.getElementById('dl');
+    const dlstatus = document.getElementById('dlstatus');
+    dl.onclick = async () => {
+      dl.disabled = true; dlstatus.textContent = 'Запрос файла…';
       try {
-        const meta = await fetch('/reports/latest').then(r => r.json());
-        if (meta.error) { reportStatus.textContent = meta.error; return; }
-        reportStatus.textContent = 'Скачиваем: ' + meta.latest_report_filename;
-        window.location.href = '/reports/download/' + encodeURIComponent(meta.latest_report_filename);
-        setTimeout(() => reportStatus.textContent = '', 3000);
+        const r = await fetch('/reports/latest');
+        const j = await r.json();
+        if (j.error) { dlstatus.textContent = j.error; dl.disabled = false; return; }
+        window.location.href = '/reports/download/' + j.latest_report_filename;
+        dlstatus.textContent = '';
       } catch (e) {
-        console.error(e);
-        reportStatus.textContent = 'Ошибка загрузки отчёта.';
+        dlstatus.textContent = 'Ошибка загрузки отчёта';
+      } finally {
+        dl.disabled = false;
       }
-    });
+    };
   </script>
 </body>
 </html>

@@ -1,117 +1,110 @@
 # app/reporting.py
-import os
-import csv
+import os, csv, asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, func
+
+from .database import AsyncSessionLocal
+from . import models
 import redis.asyncio as redis
 
-from . import models
+ALMATY = ZoneInfo("Asia/Almaty")
 
-def _dates_for_report(tz: ZoneInfo, open_t, close_t, date_override: str | None = None):
-    if date_override:
-        day = datetime.strptime(date_override, "%Y-%m-%d").replace(tzinfo=tz)
-    else:
-        now = datetime.now(tz)
-        # run at 00:05 for previous day
-        day = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = day.replace(hour=open_t.hour, minute=open_t.minute, second=0, microsecond=0)
-    end = day.replace(hour=23, minute=59, second=59, microsecond=0)  # close at ~24:00
-    return day, start, end
+def dstr(dt: datetime): return dt.strftime("%Y-%m-%d")
 
-def _day_key(prefix: str, day: datetime):
-    return f"{prefix}:{day.strftime('%Y-%m-%d')}"
+async def _read_day_redis(r: redis.Redis, day: datetime):
+    """
+    Read all counters for `day` from Redis (they expire after the next midnight).
+    This runs at 00:05 local, so yesterday’s keys still exist.
+    """
+    key = lambda k: f"{k}:{dstr(day)}"
+    pipe = r.pipeline()
+    wants = [
+        "unique_guests",
+        "order_unique", "pickup_unique",
+        "conv:order_to_pickup", "conv:pickup_to_hall", "conv:pickup_to_exit",
+        "sum:o2p_s","cnt:o2p", "sum:p2h_s","cnt:p2h", "sum:p2e_s","cnt:p2e"
+    ]
+    for k in wants:
+        pipe.get(key(k))
+    vals = await pipe.execute()
+    m = dict(zip(wants, vals))
 
-async def generate_daily_report(AsyncSessionLocal, r: redis.Redis, reports_dir: str,
-                                tz: ZoneInfo, open_t, close_t, date_override: str | None = None):
-    day, start, end = _dates_for_report(tz, open_t, close_t, date_override)
+    def to_i(x): return int(x) if x is not None else 0
+    def to_f(x):
+        try: return float(x)
+        except: return 0.0
 
-    # 1) Pull baseline deltas from Redis (baseline taken at 08:30, so "current - baseline" at 24:00 equals day totals)
-    async def _get(name): 
-        v = await r.get(_day_key(name, day)); 
-        if v is None: return 0
-        try: return float(v) if name.startswith("sum:") else int(v)
-        except: return 0
+    o2p_avg = (to_f(m["sum:o2p_s"]) / max(1, to_i(m["cnt:o2p"])))
+    p2h_avg = (to_f(m["sum:p2h_s"]) / max(1, to_i(m["cnt:p2h"])))
+    p2e_avg = (to_f(m["sum:p2e_s"]) / max(1, to_i(m["cnt:p2e"])))
 
-    keys = ["order_unique","pickup_unique","conv:order_to_pickup","conv:pickup_to_hall","conv:pickup_to_exit",
-            "sum:o2p_s","cnt:o2p","sum:p2h_s","cnt:p2h","sum:p2e_s","cnt:p2e","alerts:barista"]
-    vals = {k: await _get(k) for k in keys}
+    return {
+        "unique_guests": to_i(m["unique_guests"]),
+        "order_unique":  to_i(m["order_unique"]),
+        "pickup_unique": to_i(m["pickup_unique"]),
+        "o2p": {"count": to_i(m["conv:order_to_pickup"]), "avg_s": round(o2p_avg,1)},
+        "p2h": {"count": to_i(m["conv:pickup_to_hall"]),  "avg_s": round(p2h_avg,1)},
+        "p2e": {"count": to_i(m["conv:pickup_to_exit"]),  "avg_s": round(p2e_avg,1)},
+    }
 
-    def rate(num, den): return (num / den) if den > 0 else 0.0
-    def avg(sum_s, cnt): return (sum_s / cnt) if cnt > 0 else 0.0
+async def generate_daily_report():
+    """
+    Generate CSV for the day that just ended (08:30–24:00 ALMT).
+    """
+    # Determine 'yesterday' day window (since we run at 00:05)
+    now = datetime.now(ALMATY)
+    day = now - timedelta(days=1)
 
-    # 2) Peak occupancy from DB
-    async with AsyncSessionLocal() as session:
-        # total occupancy peak and when
-        q = (
-            select(models.OccupancyLog.ts, models.OccupancyLog.total_occupancy)
-            .where(models.OccupancyLog.ts >= start, models.OccupancyLog.ts <= end)
-            .order_by(models.OccupancyLog.total_occupancy.desc())
-            .limit(1)
+    day_start = datetime.combine(day.date(), models.time(8,30), tzinfo=ALMATY)
+    day_end   = datetime.combine(day.date(), models.time(23,59,59), tzinfo=ALMATY)
+
+    # Redis read
+    r = redis.from_url(f"redis://{os.getenv('REDIS_HOST','redis')}:6379/0")
+    kpis = await _read_day_redis(r, day)
+
+    # Peak occupancy from DB logs
+    async with AsyncSessionLocal() as sess:
+        q = select(models.OccupancyLog.ts, models.OccupancyLog.total_occupancy).where(
+            models.OccupancyLog.ts >= day_start,
+            models.OccupancyLog.ts <= day_end
+        ).order_by(models.OccupancyLog.total_occupancy.desc()).limit(1)
+        res = await sess.execute(q)
+        peak_ts, peak_occ = None, 0
+        if (row := res.first()):
+            peak_ts, peak_occ = row[0], row[1]
+
+        # Barista alerts count
+        q2 = select(func.count(models.AlertLog.id)).where(
+            models.AlertLog.timestamp >= day_start.timestamp(),
+            models.AlertLog.timestamp <= day_end.timestamp(),
+            models.AlertLog.alert_type == "STAFF_ABSENCE"
         )
-        res = (await session.execute(q)).first()
-        peak_ts, peak_val = (res[0], res[1]) if res else (None, 0)
+        res2 = await sess.execute(q2)
+        barista_alerts = int(res2.scalar_one())
 
-        # total visitors (unique tracker ids touching order or hall1/2 on camera_201)
-        tv = (
-            select(func.count(func.distinct(models.TransitionEvent.tracker_id)))
-            .where(
-                models.TransitionEvent.camera_id == "camera_201",
-                models.TransitionEvent.timestamp >= start.timestamp(),
-                models.TransitionEvent.timestamp <= end.timestamp(),
-                models.TransitionEvent.event == "enter",
-                models.TransitionEvent.zone.in_(["order","hall1","hall2"])
-            )
-        )
-        visitors_total = (await session.execute(tv)).scalar_one() or 0
-
-        # total barista alerts (also in Redis, but DB is authoritative)
-        tb = (
-            select(func.count())
-            .select_from(models.AlertLog)
-            .where(
-                models.AlertLog.timestamp >= start.timestamp(),
-                models.AlertLog.timestamp <= end.timestamp(),
-                models.AlertLog.alert_type == "STAFF_ABSENCE"
-            )
-        )
-        barista_alerts_db = (await session.execute(tb)).scalar_one() or 0
-
-    # Prefer DB count for alerts; fall back to Redis if DB is empty
-    alerts_barista = barista_alerts_db if barista_alerts_db else int(vals.get("alerts:barista", 0))
-
-    # 3) Compute KPIs
-    order_unique       = int(vals["order_unique"])
-    pickup_unique      = int(vals["pickup_unique"])
-    conv_o2p           = int(vals["conv:order_to_pickup"])
-    conv_p2h           = int(vals["conv:pickup_to_hall"])
-    conv_p2e           = int(vals["conv:pickup_to_exit"])
-    avg_o2p_s          = avg(vals["sum:o2p_s"], vals["cnt:o2p"])
-    avg_p2h_s          = avg(vals["sum:p2h_s"], vals["cnt:p2h"])
-    avg_p2e_s          = avg(vals["sum:p2e_s"], vals["cnt:p2e"])
-    rate_o2p           = rate(conv_o2p, order_unique)
-    rate_p2h           = rate(conv_p2h, pickup_unique)
-    rate_p2e           = rate(conv_p2e, pickup_unique)
-
-    # 4) Write CSV
+    # Write CSV
+    reports_dir = "app/reports"
     os.makedirs(reports_dir, exist_ok=True)
-    fname = f"{day.strftime('%Y-%m-%d')}_daily_report.csv"
-    fpath = os.path.join(reports_dir, fname)
-    with open(fpath, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["Дата", day.strftime("%Y-%m-%d")])
-        w.writerow(["Окно анализа (Алматы)", start.strftime("%H:%M"), end.strftime("%H:%M")])
-        w.writerow([])
-        w.writerow(["Пиковая загрузка (чел.)", peak_val])
-        w.writerow(["Время пика (локально)", peak_ts.astimezone(tz).strftime("%H:%M") if peak_ts else "—"])
-        w.writerow([])
-        w.writerow(["Всего посетителей (уникальные треки 201: order | hall1 | hall2)", visitors_total])
-        w.writerow(["Предупреждений по бариста", alerts_barista])
-        w.writerow([])
-        w.writerow(["Показатель", "Числитель", "Знаменатель", "Конверсия", "Среднее время (сек)"])
-        w.writerow(["Order → Pickup", conv_o2p, order_unique, f"{rate_o2p:.2%}", f"{avg_o2p_s:.1f}"])
-        w.writerow(["Pickup → Hall",  conv_p2h, pickup_unique, f"{rate_p2h:.2%}", f"{avg_p2h_s:.1f}"])
-        w.writerow(["Pickup → Exit",  conv_p2e, pickup_unique, f"{rate_p2e:.2%}", f"{avg_p2e_s:.1f}"])
+    fname = f"report_{dstr(day)}.csv"
+    path = os.path.join(reports_dir, fname)
 
-    print(f"[report] saved {fpath}")
-    return fpath
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Дата", dstr(day)])
+        w.writerow(["Пиковая загрузка (чел.)", peak_occ])
+        w.writerow(["Время пика (ALMT)", peak_ts.isoformat() if peak_ts else "—"])
+        w.writerow([])
+        w.writerow(["Уникальные гости (всего за день)", kpis["unique_guests"]])
+        w.writerow(["Посетители у кассы (order_unique)", kpis["order_unique"]])
+        w.writerow(["Посетители у выдачи (pickup_unique)", kpis["pickup_unique"]])
+        w.writerow([])
+        w.writerow(["Конверсия", "Количество", "Среднее время, сек"])
+        w.writerow(["Order → Pickup", kpis["o2p"]["count"], kpis["o2p"]["avg_s"]])
+        w.writerow(["Pickup → Hall",  kpis["p2h"]["count"], kpis["p2h"]["avg_s"]])
+        w.writerow(["Pickup → Exit",  kpis["p2e"]["count"], kpis["p2e"]["avg_s"]])
+        w.writerow([])
+        w.writerow(["Оповещения (бариста отсутствует)", barista_alerts])
+
+    print(f"[reporting] Saved {path}")
+    return path
