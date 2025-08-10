@@ -1,6 +1,7 @@
 # app/models.py
 from datetime import datetime
 from typing import Optional
+from sqlalchemy import Column, Integer, Float, Date, DateTime, String
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
@@ -57,33 +58,39 @@ class AlertLog(Base):
     payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
 # ---------- Optional: daily snapshot row (nice for historical queries) ----------
-class DailySummary(Base):
-    __tablename__ = "daily_summary"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    date: Mapped[datetime] = mapped_column(sa.Date, unique=True, index=True, nullable=False)
+class DailyKPI(Base):
+    __tablename__ = "daily_kpi"
 
-    # Denominators
-    order_unique: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
-    pickup_unique: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    day = Column(Date, primary_key=True)
 
-    # Conversions
-    conv_order_to_pickup: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
-    conv_pickup_to_hall: Mapped[int]  = mapped_column(sa.Integer, default=0, nullable=False)
-    conv_pickup_to_exit: Mapped[int]  = mapped_column(sa.Integer, default=0, nullable=False)
+    unique_guests = Column(Integer, default=0)
+    pickup_valid  = Column(Integer, default=0)
 
-    # Durations (seconds)
-    avg_o2p_s: Mapped[float] = mapped_column(sa.Float, default=0.0, nullable=False)
-    avg_p2h_s: Mapped[float] = mapped_column(sa.Float, default=0.0, nullable=False)
-    avg_p2e_s: Mapped[float] = mapped_column(sa.Float, default=0.0, nullable=False)
+    order_to_pickup = Column(Integer, default=0)
+    pickup_to_hall  = Column(Integer, default=0)
+    pickup_to_exit  = Column(Integer, default=0)
 
-    # Peak occupancy
-    peak_ts: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True), nullable=True)
-    peak_occupancy: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    pickup_to_hall_pct = Column(Float, default=0.0)
+    pickup_to_exit_pct = Column(Float, default=0.0)
 
-    # Audit
-    created_at: Mapped[datetime] = mapped_column(
-        sa.DateTime(timezone=True),
-        server_default=sa.func.now(),
-        nullable=False,
-    )
+    avg_o2p_s = Column(Float, default=0.0)
+    avg_p2h_s = Column(Float, default=0.0)
+    avg_p2e_s = Column(Float, default=0.0)
+
+    total_occupancy_peak = Column(Integer, default=0)
+    total_occupancy_peak_time = Column(DateTime(timezone=True))
+
+    hall_peak = Column(Integer, default=0)
+    hall_peak_time = Column(DateTime(timezone=True))
+    queue_peak = Column(Integer, default=0)
+    queue_peak_time = Column(DateTime(timezone=True))
+
+    barista_alerts = Column(Integer, default=0)
+
+    # NEW: peak period of day (bucketed average)
+    peak_period_start = Column(DateTime(timezone=True))
+    peak_period_end   = Column(DateTime(timezone=True))
+    peak_period_avg_occupancy = Column(Float, default=0.0)
+
+    note = Column(String, default="")

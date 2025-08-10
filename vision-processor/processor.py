@@ -1,63 +1,74 @@
-import os
-import json
-import time
-from collections import defaultdict
-from typing import Dict, Set
+# vision-processor/vision_processor.py
+import os, json, time
+from datetime import datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
+from collections import defaultdict, deque
+from typing import Dict, Set, List, Tuple, Optional
 
-import cv2
-import numpy as np
-import redis
-import torch
+import cv2, numpy as np, redis, torch
 from ultralytics import YOLO
 import supervision as sv
 from multiprocessing import Process
 from threading import Thread
 from queue import Queue, Empty
 
+# ==================== GLOBAL SETTINGS ====================
+ALMATY_TZ        = ZoneInfo("Asia/Almaty")
+OPEN_T           = dtime(8, 30)
+CLOSE_T          = dtime(23, 59, 59)
 
-# ===============================
-# CONFIG (override via env)
-# ===============================
-MODEL_NAME        = os.getenv("MODEL_NAME", "yolo11l.pt")
+MODEL_NAME       = os.getenv("MODEL_NAME", "yolo11l.pt")
+IMG_SIZE         = int(os.getenv("IMG_SIZE", 1280))
 
-# Detection / tracking
-CONF_DETECT_LOW   = float(os.getenv("CONF_DETECT_LOW", 0.10))   # generous for tracker
-CONF_STABLE       = float(os.getenv("CONF_STABLE", 0.35))       # for counting
-IOU_NMS           = float(os.getenv("IOU_NMS", 0.30))           # separate close people
+CONF_DETECT_LOW  = float(os.getenv("CONF_DETECT_LOW", 0.10))
+IOU_NMS          = float(os.getenv("IOU_NMS", 0.30))
+CONFIRM_THRESH   = float(os.getenv("CONFIRM_THRESH", 0.30))
+KEEP_THRESH      = float(os.getenv("KEEP_THRESH", 0.15))
 
-CONFIRM_THRESH = float(os.getenv("CONFIRM_THRESH", 0.30))  # confirm a track
-KEEP_THRESH    = float(os.getenv("KEEP_THRESH", 0.15))
+ENTER_SECONDS    = float(os.getenv("ENTER_SECONDS", 0.8))   # hysteresis enter
+EXIT_SECONDS     = float(os.getenv("EXIT_SECONDS", 2.5))    # hysteresis exit
+MIN_AGE_FRAMES   = int(os.getenv("MIN_AGE_FRAMES", 5))
+COAST_FRAMES     = int(os.getenv("COAST_FRAMES", 60))
+GRAY_STD_THRESH  = float(os.getenv("GRAY_STD_THRESH", 10.0))
 
-# Track stability
-MIN_AGE_FRAMES    = int(os.getenv("MIN_AGE_FRAMES", 5))         # min age before affecting counts
-ENTER_FRAMES      = int(os.getenv("ENTER_FRAMES", 3))           # hysteresis: frames inside to add
-EXIT_FRAMES       = int(os.getenv("EXIT_FRAMES", 3))            # hysteresis: frames outside to remove
-COAST_FRAMES      = int(os.getenv("COAST_FRAMES", 60))          # frames we allow ID to “miss” before cleanup
+# Conversions (seconds)
+ORDER_TO_PICKUP_S = int(os.getenv("ORDER_TO_PICKUP_S", 900))
+PICKUP_TO_HALL_S  = int(os.getenv("PICKUP_TO_HALL_S", 900))
+PICKUP_TO_EXIT_S  = int(os.getenv("PICKUP_TO_EXIT_S", 900))
 
-# RTSP guard
-GRAY_STD_THRESH   = float(os.getenv("GRAY_STD_THRESH", 10.0))   # gray/corrupt frame std threshold
+# Unique guests: count when dwell in ORDER ≥ 10s
+MIN_ORDER_DWELL_S = int(os.getenv("MIN_ORDER_DWELL_S", 10))
 
-# Redis
-REDIS_HOST        = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT        = int(os.getenv("REDIS_PORT", 6379))
-DATA_CHANNEL      = "vision-data-events"
-ALERT_CHANNEL     = "vision-alert-events"
-ZONE_CHANGE_CH    = "vision-zone-change-events"
+# Association / dwell
+MAX_ASSOC_DIST    = int(os.getenv("MAX_ASSOC_DIST", 220))     # px for ID-bridge
+PICKUP_DWELL_S    = float(os.getenv("PICKUP_DWELL_S", 3.0))   # require ≥3s in pickup
 
-# Conversion windows (seconds)
-ENTRY_TO_QUEUE_S  = int(os.getenv("ENTRY_TO_QUEUE_S", 60))
-QUEUE_TO_HALL_S   = int(os.getenv("QUEUE_TO_HALL_S", 90))
+# Unique guest cross-ID dedupe (re-entries)
+UNIQUE_COOLDOWN_S = int(os.getenv("UNIQUE_COOLDOWN_S", 1200)) # 20 min
+UNIQUE_ASSOC_DIST = int(os.getenv("UNIQUE_ASSOC_DIST", 220))   # px
 
-# Unique visitor dedupe window in seconds (per entry)
-UNIQUE_DEDUPE_S   = int(os.getenv("UNIQUE_DEDUPE_S", 300))      # 5 min
+# Redis / channels
+REDIS_HOST       = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT       = int(os.getenv("REDIS_PORT", 6379))
+DATA_CHANNEL     = "vision-data-events"
+ZONE_CHANGE_CH   = "vision-zone-change-events"
+ALERT_CHANNEL    = "vision-alert-events"
 
-# Barista alert
-BARISTA_ABSENCE_S = int(os.getenv("BARISTA_ABSENCE_S", 60))
+DEBUG = os.getenv("VP_DEBUG", "0") == "1"
+def log(*a, **kw):
+    if DEBUG:
+        print(*a, **kw, flush=True)
 
+def day_key(prefix: str, dt: Optional[datetime] = None) -> str:
+    if dt is None: dt = datetime.now(ALMATY_TZ)
+    return f"{prefix}:{dt.strftime('%Y-%m-%d')}"
 
-# ===============================
-# THREADED CAPTURE
-# ===============================
+def seconds_until_midnight(dt: Optional[datetime] = None) -> int:
+    if dt is None: dt = datetime.now(ALMATY_TZ)
+    nxt = (dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60, int((nxt - dt).total_seconds()))
+
+# ==================== CAPTURE ====================
 class VideoCaptureThreaded:
     def __init__(self, src: str, name: str):
         self.src = src
@@ -68,7 +79,6 @@ class VideoCaptureThreaded:
         self.t.start()
 
     def _reader(self):
-        print(f"[{self.t.name}] started for {self.src}", flush=True)
         while self.is_running:
             ret, frame = self.cap.read()
             if not ret:
@@ -89,306 +99,359 @@ class VideoCaptureThreaded:
         self.t.join()
         self.cap.release()
 
-
 def get_device():
     if torch.cuda.is_available(): return "cuda"
     if torch.backends.mps.is_available(): return "mps"
     return "cpu"
 
+def is_corrupted(frame: np.ndarray) -> bool:
+    return frame is None or frame.size == 0 or frame.std() < GRAY_STD_THRESH
 
-def is_corrupted(frame: np.ndarray, std_thresh: float = GRAY_STD_THRESH) -> bool:
-    return frame is None or frame.size == 0 or frame.std() < std_thresh
-
-
-# ===============================
-# REDIS HELPERS
-# ===============================
-def seconds_until_midnight() -> int:
-    now = time.localtime()
-    midnight = time.mktime((now.tm_year, now.tm_mon, now.tm_mday + 1, 0, 0, 0, 0, 0, -1))
-    return int(max(60, midnight - time.mktime(now)))
-
-def day_key(prefix: str) -> str:
-    return f"{prefix}:{time.strftime('%Y-%m-%d', time.localtime())}"
-
-# Sorted-set buffers for cross-camera conversion matching
-def add_event_zset(r: redis.Redis, zset_key: str, member: str, ts: float, window_s: int):
-    r.zadd(zset_key, {member: ts})
-    r.zremrangebyscore(zset_key, 0, ts - window_s)   # drop stale
-
-def pop_match(r: redis.Redis, zset_key: str, ts: float, window_s: int) -> bool:
-    # get the earliest event within [ts-window, ts]
-    candidates = r.zrangebyscore(zset_key, ts - window_s, ts, start=0, num=1)
-    if candidates:
-        r.zrem(zset_key, candidates[0])
-        return True
-    return False
-
-# ===============================
-# MAIN CAMERA LOOP
-# ===============================
+# ==================== PER-CAMERA WORKER ====================
 def process_camera(camera_id: str, config: dict):
-    track_confirmed = {}
+    track_confirmed: Dict[int, bool] = {}
+    zone_state = defaultdict(lambda: defaultdict(lambda: {"first_in": None, "last_in": None, "is_member": False}))
+
+    # Journey + association buffers (for camera_201 conversions)
+    journey: Dict[int, dict] = defaultdict(dict)
+    recent_orders:  deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
+    recent_pickups: deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
+    recent_unique:  deque = deque(maxlen=2000)   # {"ts","cx","cy"}
+    last_center: Dict[int, Tuple[int,int]] = {}
 
     rtsp_url = os.getenv(config.get("rtsp_url_env", ""), "")
     if not rtsp_url:
-        print(f"[{camera_id}] FATAL: RTSP URL env var not set", flush=True)
-        return
+        print(f"[{camera_id}] FATAL: RTSP URL not set", flush=True); return
 
     cap = VideoCaptureThreaded(rtsp_url, name=f"RTSP-{camera_id}")
     time.sleep(1.5)
 
     device = get_device()
-    print(f"[{camera_id}] Using device: {device}", flush=True)
-    model = YOLO(MODEL_NAME)
+    model  = YOLO(MODEL_NAME)
 
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
     try: r.ping()
-    except redis.exceptions.ConnectionError as e:
-        print(f"[{camera_id}] Redis error: {e}", flush=True); return
+    except Exception as e: print(f"[{camera_id}] Redis error: {e}"); return
 
-    tracker = sv.ByteTrack(
-        track_thresh=0.05,                 # LOWER gate into the tracker
-        track_buffer=COAST_FRAMES + 10,    # allow long coasting
-        match_thresh=0.8,
-        frame_rate=20
-    )
+    tracker = sv.ByteTrack(track_thresh=0.05, track_buffer=COAST_FRAMES+10, match_thresh=0.8, frame_rate=20)
 
-    # zones
     zones_cfg = config["zones"]
-    zone_names = [z["name"] for z in zones_cfg]
-    zones = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=(1920, 1080), triggering_position=sv.Position.CENTER) for z in zones_cfg]
+    names     = [z["name"] for z in zones_cfg]
+    names_lc  = [n.lower() for n in names]
 
-    # derived names (if exist)
-    has_queue  = any(n.lower() == "queue"  for n in zone_names)
-    has_hall   = any(n.lower() == "hall"   for n in zone_names)
-    has_entry  = any(n.lower() == "entry"  for n in zone_names)
-    barista_zn = next((n for n in zone_names if "barista" in n.lower()), None)
+    # KEEP THIS EXACT LINE:
+    zones     = [sv.PolygonZone(polygon=np.array(z["polygon"], np.int32), frame_resolution_wh=(1920, 1080), triggering_position=sv.Position.CENTER) for z in zones_cfg]
 
-    # state
-    age_frames: Dict[int, int]  = defaultdict(int)
-    miss_frames: Dict[int, int] = defaultdict(int)
-    in_counts  = defaultdict(lambda: defaultdict(int))
-    out_counts = defaultdict(lambda: defaultdict(int))
-    zone_members: Dict[str, Set[int]] = { zn: set() for zn in zone_names }
-    last_payload_counts = { zn: 0 for zn in zone_names }
-
-    # barista alert state
     last_barista_seen = time.time()
     alert_sent = False
+    barista_alert_cfg = config.get("alert_config")
 
-    print(f"[{camera_id}] Zones: {zone_names}", flush=True)
+    last_payload_counts = {"hall": 0, "queue": 0, "barista": 0}
+    age_frames: Dict[int, int]  = defaultdict(int)
+    miss_frames: Dict[int, int] = defaultdict(int)
+
+    log(f"[{camera_id}] Zones: {names}")
+
+    # helpers
+    def _euclid(a: Optional[Tuple[int,int]], b: Optional[Tuple[int,int]]) -> float:
+        if not a or not b: return 1e9
+        ax, ay = a; bx, by = b
+        dx = ax - bx; dy = ay - by
+        return (dx*dx + dy*dy)**0.5
+
+    def match_from_buffer(buf: deque, ts: float, center: Tuple[int,int], window_s: int) -> Optional[dict]:
+        best, best_d = None, 1e9
+        for ev in reversed(buf):
+            if ev.get("used"): continue
+            if ts - ev["ts"] > window_s: break
+            d = _euclid(center, (ev["cx"], ev["cy"]))
+            if d < best_d:
+                best, best_d = ev, d
+        if best and best_d <= MAX_ASSOC_DIST:
+            best["used"] = True
+            return best
+        return None
+
+    def exists_close(buf: deque, ts: float, center: Tuple[int,int], window_s: int, dist_px: int) -> bool:
+        if not center: return False
+        for ev in reversed(buf):
+            if ts - ev["ts"] > window_s: break
+            if _euclid(center, (ev["cx"], ev["cy"])) <= dist_px:
+                return True
+        return False
 
     while True:
-        frame = cap.read()
-
-        # corrupt frame → publish last good counts, do not mutate state
+        frame = cap.read(); now = time.time()
         if is_corrupted(frame):
-            r.publish(DATA_CHANNEL, json.dumps({
-                "timestamp": time.time(),
-                "camera_id": camera_id,
-                "zone_counts": last_payload_counts
-            }))
+            r.publish(DATA_CHANNEL, json.dumps({"timestamp": now, "camera_id": camera_id, "zone_counts": last_payload_counts}))
             continue
 
-        # DETECT & TRACK
         with torch.no_grad():
-            res = model(
-                frame,
-                imgsz=int(os.getenv("IMG_SIZE", 1280)),   # was default 640 — 960/1280 helps a lot
-                conf=CONF_DETECT_LOW,                     # e.g., 0.05–0.10, generous for tracker
-                iou=IOU_NMS,                              # 0.25–0.35 separates close people
-                classes=[0],
-                device=device,
-                verbose=False
-            )[0]
+            res = model(frame, imgsz=IMG_SIZE, conf=CONF_DETECT_LOW, iou=IOU_NMS, classes=[0], device=device, verbose=False)[0]
         dets = sv.Detections.from_ultralytics(res)
         tracks = tracker.update_with_detections(dets)
 
-        # update age/miss
+        # Age/miss
         current_ids = set(tracks.tracker_id) if tracks.tracker_id is not None else set()
         for tid in current_ids:
-            tid = int(tid)
-            age_frames[tid] += 1
-            miss_frames[tid] = 0
+            tid = int(tid); age_frames[tid] += 1; miss_frames[tid] = 0
         for tid in list(age_frames.keys()):
             if tid not in current_ids:
                 miss_frames[tid] += 1
                 if miss_frames[tid] > COAST_FRAMES:
-                    # cleanup all track state
-                    age_frames.pop(tid, None)
-                    miss_frames.pop(tid, None)
-                    in_counts.pop(tid, None)
-                    out_counts.pop(tid, None)
-                    for zn in zone_names:
-                        zone_members[zn].discard(tid)
+                    age_frames.pop(tid, None); miss_frames.pop(tid, None)
+                    zone_state.pop(tid, None); journey.pop(tid, None); track_confirmed.pop(tid, None)
 
-        # filter stable tracks by age + conf
+        # Confirm/keep
         stable_idx = []
         if tracks.tracker_id is not None:
             for i, tid in enumerate(tracks.tracker_id):
-                tid = int(tid)
-                conf_i = float(tracks.confidence[i])
-
-                # must be alive long enough
-                if age_frames[tid] < MIN_AGE_FRAMES:
-                    continue
-
-                # confirm if confidence is high enough once
+                tid = int(tid); conf_i = float(tracks.confidence[i])
+                if age_frames[tid] < MIN_AGE_FRAMES: continue
                 if not track_confirmed.get(tid, False):
-                    if conf_i >= CONFIRM_THRESH:
-                        track_confirmed[tid] = True
-                    else:
-                        # not confirmed yet; don't count it this frame
-                        continue
-
-                # already confirmed → allow it to stay even with lower confidence,
-                # and also let coasting handle brief “no detection” gaps
+                    if conf_i >= CONFIRM_THRESH: track_confirmed[tid] = True
+                    else: continue
                 if conf_i >= KEEP_THRESH or miss_frames[tid] <= COAST_FRAMES:
                     stable_idx.append(i)
                 else:
-                    # very low confidence and already missed too long → drop confirmation
                     track_confirmed.pop(tid, None)
 
         stable = tracks[np.array(stable_idx, dtype=int)] if stable_idx else sv.Detections.empty()
 
-        # HYSTERESIS MEMBERSHIP (anchor=center)
-        # build masks once
-        zone_masks = {}
-        for zn, zone in zip(zone_names, zones):
-            zone_masks[zn] = zone.trigger(detections=stable)
+        # Centers for stable detections
+        centers: List[Tuple[int,int]] = []
+        if len(stable) > 0 and stable.tracker_id is not None:
+            for i in range(len(stable)):
+                x1, y1, x2, y2 = map(float, stable.xyxy[i])
+                cx = int((x1 + x2) / 2); cy = int((y1 + y2) / 2)
+                centers.append((cx, cy))
+                last_center[int(stable.tracker_id[i])] = (cx, cy)
 
-        # store whether a track just ENTERED a zone (for conversions)
-        zone_enter_events = []  # tuples: (zone_name, track_id, ts)
+        # Zone masks (no anchor passed; zone uses CENTER)
+        zone_masks: List[np.ndarray] = [np.array([], dtype=bool) for _ in zones]
+        if len(stable) > 0 and stable.tracker_id is not None:
+            for i, zone in enumerate(zones):
+                zone_masks[i] = zone.trigger(detections=stable)
 
-        if stable.tracker_id is not None and len(stable) > 0:
-            for idx, tid in enumerate(stable.tracker_id):
-                tid = int(tid)
-                for zn in zone_names:
-                    inside = bool(zone_masks[zn][idx])
+        # Enter/exit events (hysteresis)
+        enter_events: List[Tuple[str, int, float, Optional[Tuple[int,int]]]] = []
+        if len(stable) > 0 and stable.tracker_id is not None:
+            for di in range(len(stable)):
+                tid = int(stable.tracker_id[di])
+                for pi in range(len(zones)):
+                    inside = bool(zone_masks[pi][di]) if zone_masks[pi].size > di else False
+                    st     = zone_state[tid][pi]
+                    zname  = names_lc[pi]
                     if inside:
-                        in_counts[tid][zn]  += 1
-                        out_counts[tid][zn]  = 0
-                        if in_counts[tid][zn] == ENTER_FRAMES:
-                            # first time we cross the enter threshold → enter event
-                            zone_members[zn].add(tid)
-                            zone_enter_events.append((zn, tid, time.time()))
-                            # optional: publish enter event
+                        if st["first_in"] is None: st["first_in"] = now
+                        st["last_in"] = now
+                        if not st["is_member"] and (now - st["first_in"]) >= ENTER_SECONDS:
+                            st["is_member"] = True
+                            enter_events.append((zname, tid, now, centers[di] if di < len(centers) else last_center.get(tid)))
                             r.publish(ZONE_CHANGE_CH, json.dumps({
-                                "timestamp": time.time(), "camera_id": camera_id,
-                                "tracker_id": tid, "event": "enter", "zone": zn
+                                "timestamp": now, "camera_id": camera_id, "tracker_id": tid, "event":"enter", "zone": zname
                             }))
                     else:
-                        out_counts[tid][zn] += 1
-                        in_counts[tid][zn]   = 0
-                        if out_counts[tid][zn] == EXIT_FRAMES:
-                            zone_members[zn].discard(tid)
+                        st["first_in"] = None
+                        if st["is_member"] and st["last_in"] and (now - st["last_in"]) >= EXIT_SECONDS:
+                            st["is_member"] = False
                             r.publish(ZONE_CHANGE_CH, json.dumps({
-                                "timestamp": time.time(), "camera_id": camera_id,
-                                "tracker_id": tid, "event": "exit", "zone": zn
+                                "timestamp": now, "camera_id": camera_id, "tracker_id": tid, "event":"exit", "zone": zname
                             }))
 
-        # Occupancy after updates
-        occupancy = { zn: len(zone_members[zn]) for zn in zone_names }
+        # ===== UNIQUE GUESTS: dwell in ORDER ≥ MIN_ORDER_DWELL_S with cross-ID dedupe =====
+        if camera_id == "camera_201":
+            k_unique = day_key("unique_guests")
+            ttl = seconds_until_midnight()
+            for tid, per_poly in zone_state.items():
+                order_idxs = [i for i,n in enumerate(names_lc) if n == "order"]
+                if not order_idxs: continue
+                in_order = False; first_in = None
+                for oi in order_idxs:
+                    st = per_poly.get(oi)
+                    if st and st["is_member"] and st["first_in"] is not None:
+                        in_order = True
+                        first_in = first_in if first_in is not None else st["first_in"]
+                if not in_order or first_in is None: continue
 
-        # ===============================
-        # CONVERSIONS & UNIQUE VISITORS
-        # ===============================
-        now = time.time()
-        day_visitors_key = day_key("visitors:count")             # counter
-        dedupe_prefix    = day_key("visitors:seen")              # per-day dedupe namespace
+                dwell = now - first_in
+                if dwell < MIN_ORDER_DWELL_S: continue
 
-        # ZSET buffers used across cameras
-        z_entry = day_key("convbuf:entry")
-        z_queue = day_key("convbuf:queue")
+                j = journey[tid]
+                if j.get("unique_counted"): continue
 
-        for zn, tid, ts in zone_enter_events:
-            # 1) UNIQUE VISITORS (count only on entry zone)
-            if zn.lower() == "entry":
-                # per-day dedupe key for this track (camera+id)
-                entry_key = day_key("entry_count")
-                r.incr(entry_key); r.expire(entry_key, seconds_until_midnight())
+                ded = day_key(f"seen:unique_guest:{camera_id}:{tid}")
+                already_tid = not r.set(ded, "1", ex=ttl, nx=True)
 
-                dedupe_key = f"{dedupe_prefix}:{camera_id}:{tid}"
-                # if new within window, count as a new unique visitor for the day
-                added = r.set(dedupe_key, "1", ex=max(UNIQUE_DEDUPE_S, 60), nx=True)
-                # also set TTL until midnight so we can recount tomorrow
-                r.expire(dedupe_key, seconds_until_midnight())
-                if added:
-                    r.incr(day_visitors_key)
-                    r.expire(day_visitors_key, seconds_until_midnight())
+                center_now = last_center.get(int(tid))
+                already_nearby = exists_close(recent_unique, now, center_now, UNIQUE_COOLDOWN_S, UNIQUE_ASSOC_DIST)
 
-                # also add to entry buffer for entry->queue conversion
-                add_event_zset(r, z_entry, f"{camera_id}:{tid}:{int(ts)}", ts, ENTRY_TO_QUEUE_S)
+                if not (already_tid or already_nearby):
+                    r.incr(k_unique); r.expire(k_unique, ttl)
+                    log(f"[{camera_id}] UNIQUE ++ tid={tid} dwell={dwell:.1f}s")
+                    if center_now:
+                        recent_unique.append({"ts": now, "cx": center_now[0], "cy": center_now[1]})
+                j["unique_counted"] = True
 
-            # 2) Add queue enters to buffer and try to match with entry
-            if zn.lower() == "queue":
-                qent_key = day_key("queue_entries")
-                r.incr(qent_key); r.expire(qent_key, seconds_until_midnight())
-                # match any entry event within window (global, any camera)
-                if pop_match(r, z_entry, ts, ENTRY_TO_QUEUE_S):
-                    conv_key = day_key("conv:entry_to_queue")
-                    r.incr(conv_key)
-                    r.expire(conv_key, seconds_until_midnight())
-                # Add this queue enter to buffer for queue->hall
-                add_event_zset(r, z_queue, f"{camera_id}:{tid}:{int(ts)}", ts, QUEUE_TO_HALL_S)
+        # ===== CONVERSIONS with ID bridging & pickup dwell gate (camera_201) =====
+        if camera_id == "camera_201" and enter_events:
+            k_conv_o2p      = day_key("conv:order_to_pickup")
+            k_conv_p2h      = day_key("conv:pickup_to_hall")
+            k_conv_p2e      = day_key("conv:pickup_to_exit")
+            k_sum_o2p       = day_key("sum:o2p_s");  k_cnt_o2p = day_key("cnt:o2p")
+            k_sum_p2h       = day_key("sum:p2h_s");  k_cnt_p2h = day_key("cnt:p2h")
+            k_sum_p2e       = day_key("sum:p2e_s");  k_cnt_p2e = day_key("cnt:p2e")
+            k_pickup_valid  = day_key("pickup_valid")   # denominator for %s
+            ttl = seconds_until_midnight()
 
-            # 3) Hall enters try to match with queue within window
-            if zn.lower() == "hall":
-                if pop_match(r, z_queue, ts, QUEUE_TO_HALL_S):
-                    conv_key = day_key("conv:queue_to_hall")
-                    r.incr(conv_key)
-                    r.expire(conv_key, seconds_until_midnight())
+            # Stage A: cache raw order enters
+            for zname, tid, ts, center in enter_events:
+                j = journey.setdefault(tid, {})
+                if zname == "order":
+                    recent_orders.append({"ts": ts, "cx": (center or (0,0))[0], "cy": (center or (0,0))[1], "used": False})
+                    j.setdefault("order_enter_ts", ts); j["last_ts"] = ts
 
-        # ===============================
-        # BARISTA ALERT
-        # ===============================
-        if barista_zn:
-            if occupancy.get(barista_zn, 0) > 0:
-                last_barista_seen = now
-                alert_sent = False
-            else:
-                if not alert_sent and (now - last_barista_seen) > BARISTA_ABSENCE_S:
-                    r.publish(ALERT_CHANNEL, json.dumps({
-                        "timestamp": now, "camera_id": camera_id,
-                        "alert_type": "STAFF_ABSENCE",
-                        "message": f"No barista in '{barista_zn}' > {BARISTA_ABSENCE_S}s"
-                    }))
-                    alert_sent = True
+            # Stage B: when pickup dwell ≥ PICKUP_DWELL_S, count pickup_valid once and emit order→pickup
+            for tid_k, per_poly in zone_state.items():
+                in_pick = False; first_in = None
+                for pi, nm in enumerate(names_lc):
+                    if nm != "pickup": continue
+                    st = per_poly.get(pi)
+                    if st and st["is_member"] and st["first_in"] is not None:
+                        in_pick = True
+                        first_in = first_in or st["first_in"]
+                if not in_pick or first_in is None:
+                    continue
 
-        # ===============================
-        # PUBLISH CURRENT OCCUPANCY
-        # ===============================
-        payload = {
-            "timestamp": now,
-            "camera_id": camera_id,
-            "zone_counts": occupancy
-        }
-        r.publish(DATA_CHANNEL, json.dumps(payload))
-        last_payload_counts = occupancy
+                dwell = now - first_in
+                if dwell < PICKUP_DWELL_S:
+                    continue
 
+                j = journey.setdefault(tid_k, {})
 
-# ===============================
-# BOOT
-# ===============================
-if __name__ == "__main__":
-    with open("configs/zones.json", "r") as f:
-        full_cfg = json.load(f)
+                # Denominator: count each track once when they meet dwell
+                if not j.get("pickup_valid_counted"):
+                    r.incr(k_pickup_valid); r.expire(k_pickup_valid, ttl)
+                    j["pickup_valid_counted"] = True
 
-    processes = []
+                # order→pickup once (same ID first, then bridge)
+                if not j.get("counted_o2p"):
+                    dt = None
+                    if "order_enter_ts" in j:
+                        dt = now - j["order_enter_ts"]
+                        if 0 <= dt <= ORDER_TO_PICKUP_S:
+                            r.incr(k_conv_o2p); r.expire(k_conv_o2p, ttl)
+                            r.incrbyfloat(k_sum_o2p, float(dt)); r.incr(k_cnt_o2p)
+                            r.expire(k_sum_o2p, ttl); r.expire(k_cnt_o2p, ttl)
+                            j["counted_o2p"] = True
+                    if not j.get("counted_o2p"):
+                        cnow = last_center.get(int(tid_k))
+                        ev = match_from_buffer(recent_orders, now, cnow, ORDER_TO_PICKUP_S)
+                        if ev:
+                            dt = now - ev["ts"]
+                            r.incr(k_conv_o2p); r.expire(k_conv_o2p, ttl)
+                            r.incrbyfloat(k_sum_o2p, float(dt)); r.incr(k_cnt_o2p)
+                            r.expire(k_sum_o2p, ttl); r.expire(k_cnt_o2p, ttl)
+                            j["counted_o2p"] = True
+
+                # buffer pickup point for next hops
+                c = last_center.get(int(tid_k))
+                if c and not any((now - ev["ts"] < 2 and _euclid((ev["cx"],ev["cy"]), c) < 20) for ev in recent_pickups):
+                    recent_pickups.append({"ts": now, "cx": c[0], "cy": c[1], "used": False})
+
+            # Stage C: on hall/exit enters, match recent pickup within window
+            for zname, tid, ts, center in enter_events:
+                if zname in ("hall1","hall2"):
+                    ev = match_from_buffer(recent_pickups, ts, center, PICKUP_TO_HALL_S)
+                    if ev:
+                        dt = ts - ev["ts"]
+                        r.incr(k_conv_p2h); r.expire(k_conv_p2h, ttl)
+                        r.incrbyfloat(k_sum_p2h, float(dt)); r.incr(k_cnt_p2h)
+                        r.expire(k_sum_p2h, ttl); r.expire(k_cnt_p2h, ttl)
+                elif zname == "exit":
+                    ev = match_from_buffer(recent_pickups, ts, center, PICKUP_TO_EXIT_S)
+                    if ev:
+                        dt = ts - ev["ts"]
+                        r.incr(k_conv_p2e); r.expire(k_conv_p2e, ttl)
+                        r.incrbyfloat(k_sum_p2e, float(dt)); r.incr(k_cnt_p2e)
+                        r.expire(k_sum_p2e, ttl); r.expire(k_cnt_p2e, ttl)
+
+        # ===== LIVE OCCUPANCY (for dashboard) =====
+        def count_group(label: str) -> int:
+            idxs = [i for i,n in enumerate(names_lc) if n == label]
+            if not idxs: return 0
+            ids: Set[int] = set()
+            for tid, states in zone_state.items():
+                for i in idxs:
+                    st = states.get(i)
+                    if st and st["is_member"]:
+                        ids.add(tid); break
+            return len(ids)
+
+        occ = {"hall": count_group("hall"), "queue": count_group("queue")}
+        if "barista" in names_lc:
+            present = 1 if count_group("barista") > 0 else 0
+            occ["barista"] = present
+            if present:
+                last_barista_seen = now; alert_sent = False
+            elif barista_alert_cfg and not alert_sent and (now - last_barista_seen) > barista_alert_cfg.get("absence_threshold_seconds", 30):
+                r.publish(ALERT_CHANNEL, json.dumps({
+                    "timestamp": now, "camera_id": camera_id,
+                    "alert_type": "STAFF_ABSENCE",
+                    "message": f"No barista in 'barista' > {barista_alert_cfg.get('absence_threshold_seconds', 30)}s"
+                }))
+                alert_sent = True
+
+        r.publish(DATA_CHANNEL, json.dumps({"timestamp": now, "camera_id": camera_id, "zone_counts": occ}))
+        last_payload_counts = occ
+
+# ==================== SCHEDULER ====================
+def within_business_hours(dt: datetime) -> bool:
+    t = dt.timetz()
+    return OPEN_T <= t <= CLOSE_T
+
+def seconds_until(target_dt: datetime, now: datetime) -> int:
+    return max(1, int((target_dt - now).total_seconds()))
+
+def next_open(now: datetime) -> datetime:
+    start = now.replace(hour=OPEN_T.hour, minute=OPEN_T.minute, second=0, microsecond=0)
+    return start if now <= start else (start + timedelta(days=1))
+
+def next_close(now: datetime) -> datetime:
+    end = now.replace(hour=CLOSE_T.hour, minute=CLOSE_T.minute, second=CLOSE_T.second, microsecond=0)
+    return end if now <= end else (end + timedelta(days=1))
+
+def spawn_all(full_cfg: dict) -> list[Process]:
+    procs: list[Process] = []
     for cam_id, cam_cfg in full_cfg.items():
         p = Process(target=process_camera, args=(cam_id, cam_cfg), daemon=True)
-        p.start()
-        processes.append(p)
-        print(f"Started camera process {cam_id}", flush=True)
+        p.start(); procs.append(p)
+        print(f"[scheduler] started {cam_id} pid={p.pid}")
+    return procs
 
+def kill_all(procs: list[Process]):
+    for p in procs:
+        if p.is_alive(): p.terminate()
+    for p in procs:
+        if p.is_alive(): p.join(timeout=5)
+    print("[scheduler] all workers stopped")
+
+if __name__ == "__main__":
+    with open("configs/zones.json", "r") as f:
+        full_config = json.load(f)
+
+    procs: list[Process] = []
     try:
         while True:
-            time.sleep(1)
+            now = datetime.now(ALMATY_TZ)
+            if within_business_hours(now):
+                if not procs:
+                    procs = spawn_all(full_config)
+                time.sleep(min(30, seconds_until(next_close(now), now)))
+            else:
+                if procs:
+                    kill_all(procs); procs = []
+                time.sleep(min(60, seconds_until(next_open(now), now)))
     except KeyboardInterrupt:
-        print("Shutting down…", flush=True)
-        for p in processes:
-            if p.is_alive():
-                p.terminate()
-                p.join()
-        print("All processes terminated.", flush=True)
+        kill_all(procs)
+        print("scheduler shutdown")
