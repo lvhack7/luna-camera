@@ -58,6 +58,7 @@ services:
       - redis
     volumes:
       - ./configs:/app/configs:ro # Mount configs as read-only
+      - ./debug:/app/debug
     networks:
       - vision-net
     # --- GPU ACCELERATION FOR NVIDIA ---

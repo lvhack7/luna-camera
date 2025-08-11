@@ -125,6 +125,8 @@ Desktop.ini
 # Linux
 *~
 
+debug/
+
 # VS Code workspace storage
 .vscode-test/
 
