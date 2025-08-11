@@ -17,8 +17,8 @@ ALMATY_TZ        = ZoneInfo("Asia/Almaty")
 OPEN_T           = dtime(8, 30)
 CLOSE_T          = dtime(23, 59, 59)
 
-MODEL_NAME       = os.getenv("MODEL_NAME", "yolo11l.pt")
-IMG_SIZE         = int(os.getenv("IMG_SIZE", 1280))
+MODEL_NAME       = os.getenv("MODEL_NAME", "yolo11m.pt")
+IMG_SIZE         = int(os.getenv("IMG_SIZE", 960))
 
 CONF_DETECT_LOW  = float(os.getenv("CONF_DETECT_LOW", 0.10))
 IOU_NMS          = float(os.getenv("IOU_NMS", 0.30))
@@ -40,7 +40,7 @@ PICKUP_TO_EXIT_S  = int(os.getenv("PICKUP_TO_EXIT_S", 900))
 MIN_ORDER_DWELL_S = int(os.getenv("MIN_ORDER_DWELL_S", 10))
 
 # Association / dwell (ID bridging via spatial proximity)
-MAX_ASSOC_DIST    = int(os.getenv("MAX_ASSOC_DIST", 220))     # px for O→P bridge
+MAX_ASSOC_DIST    = int(os.getenv("MAX_ASSOC_DIST", 220))     # px for O→P / P→(Hall/Exit) bridge
 PICKUP_DWELL_S    = float(os.getenv("PICKUP_DWELL_S", 3.0))   # require ≥3s in pickup
 
 # Unique guest cross-ID dedupe (re-entries)
@@ -56,17 +56,16 @@ ALERT_CHANNEL    = "vision-alert-events"
 
 # ==================== DEBUG SETTINGS ====================
 DEBUG = os.getenv("VP_DEBUG", "0") == "1"
-DEBUG_INTERVAL = float(os.getenv("VP_DEBUG_INTERVAL", 5))         # seconds between console logs
-SNAPSHOT_DIR = os.getenv("VP_SNAPSHOT_DIR", "/app/debug")          # where to store annotated frames
-SNAPSHOT_EVERY_S = float(os.getenv("VP_SNAPSHOT_EVERY_S", 0))      # 0 disables snapshots
-PUBLISH_DEBUG = os.getenv("VP_PUBLISH_DEBUG", "0") == "1"          # publish metrics to Redis
+DEBUG_INTERVAL = float(os.getenv("VP_DEBUG_INTERVAL", 5))
+SNAPSHOT_DIR = os.getenv("VP_SNAPSHOT_DIR", "/app/debug")
+SNAPSHOT_EVERY_S = float(os.getenv("VP_SNAPSHOT_EVERY_S", 0))
+PUBLISH_DEBUG = os.getenv("VP_PUBLISH_DEBUG", "0") == "1"
 DEBUG_CH = "vision-debug-events"
 
 def log(*a, **kw):
     if DEBUG:
         print(*a, **kw, flush=True)
 
-# --- small utilities for FPS/latency smoothing ---
 from collections import deque
 class RateCounter:
     def __init__(self, horizon=300):
@@ -97,18 +96,13 @@ def seconds_until_midnight(dt: Optional[datetime] = None) -> int:
 
 # ==================== CAPTURE ====================
 class VideoCaptureThreaded:
-    """
-    Threaded RTSP reader with:
-      - drop-old queue (maxsize=1) to always process newest frame
-      - capture FPS measurement
-    """
+    """Threaded RTSP reader with newest-frame queue and FPS meter."""
     def __init__(self, src: str, name: str):
         self.src = src
         self.q = Queue(maxsize=1)
         self.is_running = True
         self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
         self.t = Thread(target=self._reader, name=name, daemon=True)
-        # debug counters
         self.cap_rate = RateCounter(horizon=300)
         self.t0 = time.time()
         self.frames_total = 0
@@ -137,7 +131,6 @@ class VideoCaptureThreaded:
         self.t.join()
         self.cap.release()
 
-    # diagnostics
     def fps(self) -> float:
         return self.cap_rate.fps()
     def uptime_s(self) -> float:
@@ -155,11 +148,10 @@ def is_corrupted(frame: np.ndarray) -> bool:
 
 # ==================== PER-CAMERA WORKER ====================
 def process_camera(camera_id: str, config: dict):
-    # Track confirmation & hysteresis state
     track_confirmed: Dict[int, bool] = {}
     zone_state = defaultdict(lambda: defaultdict(lambda: {"first_in": None, "last_in": None, "is_member": False}))
 
-    # Journeys + association buffers (camera_201 conversions + unique guests)
+    # Journeys + association buffers
     journey: Dict[int, dict] = defaultdict(dict)
     recent_orders:  deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
     recent_pickups: deque = deque(maxlen=2000)   # {"ts","cx","cy","used"}
@@ -194,16 +186,13 @@ def process_camera(camera_id: str, config: dict):
     alert_sent = False
     barista_alert_cfg = config.get("alert_config")
 
-    # Live counts cache
     last_payload_counts = {"hall": 0, "queue": 0, "barista": 0}
-
-    # Local age/miss
     age_frames: Dict[int, int]  = defaultdict(int)
     miss_frames: Dict[int, int] = defaultdict(int)
 
     log(f"[{camera_id}] Zones: {names}")
 
-    # --- performance meters ---
+    # performance meters
     loop_rate = RateCounter(horizon=300)
     ema_infer_ms = EMA(alpha=0.2)
     ema_track_ms = EMA(alpha=0.2)
@@ -246,14 +235,14 @@ def process_camera(camera_id: str, config: dict):
             r.publish(DATA_CHANNEL, json.dumps({"timestamp": now, "camera_id": camera_id, "zone_counts": last_payload_counts}))
             continue
 
-        # --- DETECTION ---
+        # DETECT
         t0 = time.time()
         with torch.no_grad():
             res = model(frame, imgsz=IMG_SIZE, conf=CONF_DETECT_LOW, iou=IOU_NMS, classes=[0], device=device, verbose=False)[0]
         infer_ms = (time.time() - t0) * 1000.0
         infer_ms_smooth = ema_infer_ms.update(infer_ms)
 
-        # --- TRACKING ---
+        # TRACK
         t1 = time.time()
         dets = sv.Detections.from_ultralytics(res)
         tracks = tracker.update_with_detections(dets)
@@ -296,7 +285,7 @@ def process_camera(camera_id: str, config: dict):
                 last_center[tid_i] = (cx, cy)
                 last_center_local[tid_i] = (cx, cy)
 
-        # --- ZONES & HYSTERESIS ---
+        # ZONES & HYSTERESIS
         t2 = time.time()
         zone_masks: List[np.ndarray] = [np.array([], dtype=bool) for _ in zones]
         if len(stable) > 0 and stable.tracker_id is not None:
@@ -328,9 +317,9 @@ def process_camera(camera_id: str, config: dict):
                             r.publish(ZONE_CHANGE_CH, json.dumps({
                                 "timestamp": now, "camera_id": camera_id, "tracker_id": tid, "event":"exit", "zone": zname
                             }))
-        zone_ms_smooth = ema_zone_ms.update((time.time() - t2) * 1000.0)
+        ema_zone_ms.update((time.time() - t2) * 1000.0)
 
-        # ===== UNIQUE GUESTS: dwell in ORDER ≥ MIN_ORDER_DWELL_S with cross-ID dedupe (camera_201) =====
+        # ===== UNIQUE GUESTS (camera_201): dwell in ORDER ≥ MIN_ORDER_DWELL_S with cross-ID dedupe =====
         if camera_id == "camera_201":
             k_unique = day_key("unique_guests")
             ttl = seconds_until_midnight()
@@ -364,7 +353,7 @@ def process_camera(camera_id: str, config: dict):
                         recent_unique.append({"ts": now, "cx": center_now[0], "cy": center_now[1]})
                 j["unique_counted"] = True
 
-        # ===== CONVERSIONS with ID bridging & pickup dwell gate (camera_201) =====
+        # ===== CONVERSIONS (camera_201) — same-ID first, then spatial fallback =====
         if camera_id == "camera_201" and enter_events:
             k_conv_o2p      = day_key("conv:order_to_pickup")
             k_conv_p2h      = day_key("conv:pickup_to_hall")
@@ -372,17 +361,17 @@ def process_camera(camera_id: str, config: dict):
             k_sum_o2p       = day_key("sum:o2p_s");  k_cnt_o2p = day_key("cnt:o2p")
             k_sum_p2h       = day_key("sum:p2h_s");  k_cnt_p2h = day_key("cnt:p2h")
             k_sum_p2e       = day_key("sum:p2e_s");  k_cnt_p2e = day_key("cnt:p2e")
-            k_pickup_valid  = day_key("pickup_valid")   # denominator for conversion %
+            k_pickup_valid  = day_key("pickup_valid")
             ttl = seconds_until_midnight()
 
-            # A) cache raw order enters
+            # A) cache order enters
             for zname, tid, ts, center in enter_events:
                 j = journey.setdefault(tid, {})
                 if zname == "order":
                     recent_orders.append({"ts": ts, "cx": (center or (0,0))[0], "cy": (center or (0,0))[1], "used": False})
                     j.setdefault("order_enter_ts", ts); j["last_ts"] = ts
 
-            # B) when pickup dwell ≥ PICKUP_DWELL_S, count pickup_valid once and emit order→pickup
+            # B) when pickup dwell ≥ PICKUP_DWELL_S, mark pickup_valid and count O→P (same ID or bridge)
             for tid_k, per_poly in zone_state.items():
                 in_pick = False; first_in = None
                 for pi, nm in enumerate(names_lc):
@@ -400,12 +389,12 @@ def process_camera(camera_id: str, config: dict):
 
                 j = journey.setdefault(tid_k, {})
 
-                # Denominator: pickup_valid (each track once)
+                # denominator
                 if not j.get("pickup_valid_counted"):
                     r.incr(k_pickup_valid); r.expire(k_pickup_valid, ttl)
                     j["pickup_valid_counted"] = True
 
-                # order→pickup once (same ID, else bridge)
+                # O→P
                 if not j.get("counted_o2p"):
                     if "order_enter_ts" in j:
                         dt = now - j["order_enter_ts"]
@@ -424,27 +413,59 @@ def process_camera(camera_id: str, config: dict):
                             r.expire(k_sum_o2p, ttl); r.expire(k_cnt_o2p, ttl)
                             j["counted_o2p"] = True
 
-                # buffer pickup point for next hops
+                # buffer pickup point for P→(Hall/Exit)
                 c = last_center.get(int(tid_k))
                 if c and not any((now - ev["ts"] < 2 and ((ev["cx"]-c[0])**2 + (ev["cy"]-c[1])**2) < 400) for ev in recent_pickups):
                     recent_pickups.append({"ts": now, "cx": c[0], "cy": c[1], "used": False})
+                # remember exact pickup enter time for SAME-ID Stage C
+                j.setdefault("pickup_enter_ts", first_in)
 
-            # C) on hall/exit enters, match a recent pickup within window
+            # C) on hall/exit enters, SAME-ID first, then buffer fallback; require pickup_valid and not done
+            def _rec_conv(kind: str, dt: float):
+                if kind == "p2h":
+                    r.incr(k_conv_p2h); r.expire(k_conv_p2h, ttl)
+                    r.incrbyfloat(k_sum_p2h, float(dt)); r.incr(k_cnt_p2h)
+                    r.expire(k_sum_p2h, ttl); r.expire(k_cnt_p2h, ttl)
+                elif kind == "p2e":
+                    r.incr(k_conv_p2e); r.expire(k_conv_p2e, ttl)
+                    r.incrbyfloat(k_sum_p2e, float(dt)); r.incr(k_cnt_p2e)
+                    r.expire(k_sum_p2e, ttl); r.expire(k_cnt_p2e, ttl)
+
             for zname, tid, ts, center in enter_events:
-                if zname in ("hall1","hall2"):
-                    ev = match_from_buffer(recent_pickups, ts, center, PICKUP_TO_HALL_S)
+                if zname not in ("hall1", "hall2", "exit"):
+                    continue
+                j = journey.setdefault(tid, {})
+                if j.get("done_after_pickup"):
+                    continue
+                if not j.get("pickup_valid_counted"):
+                    # we only consider people who actually dwelled at pickup
+                    continue
+
+                used_same = False
+                if "pickup_enter_ts" in j:
+                    dt_same = ts - j["pickup_enter_ts"]
+                    if zname in ("hall1","hall2"):
+                        if 0 <= dt_same <= PICKUP_TO_HALL_S:
+                            _rec_conv("p2h", dt_same)
+                            j["done_after_pickup"] = True
+                            used_same = True
+                    else:
+                        if 0 <= dt_same <= PICKUP_TO_EXIT_S:
+                            _rec_conv("p2e", dt_same)
+                            j["done_after_pickup"] = True
+                            used_same = True
+
+                if not used_same:
+                    ev = match_from_buffer(
+                        recent_pickups,
+                        ts,
+                        center,
+                        PICKUP_TO_HALL_S if zname in ("hall1","hall2") else PICKUP_TO_EXIT_S
+                    )
                     if ev:
                         dt = ts - ev["ts"]
-                        r.incr(k_conv_p2h); r.expire(k_conv_p2h, ttl)
-                        r.incrbyfloat(k_sum_p2h, float(dt)); r.incr(k_cnt_p2h)
-                        r.expire(k_sum_p2h, ttl); r.expire(k_cnt_p2h, ttl)
-                elif zname == "exit":
-                    ev = match_from_buffer(recent_pickups, ts, center, PICKUP_TO_EXIT_S)
-                    if ev:
-                        dt = ts - ev["ts"]
-                        r.incr(k_conv_p2e); r.expire(k_conv_p2e, ttl)
-                        r.incrbyfloat(k_sum_p2e, float(dt)); r.incr(k_cnt_p2e)
-                        r.expire(k_sum_p2e, ttl); r.expire(k_cnt_p2e, ttl)
+                        _rec_conv("p2h" if zname in ("hall1","hall2") else "p2e", dt)
+                        j["done_after_pickup"] = True
 
         # ===== LIVE OCCUPANCY (for dashboard) =====
         def count_group(label: str) -> int:
@@ -459,7 +480,6 @@ def process_camera(camera_id: str, config: dict):
             return len(ids)
 
         occ = {"hall": count_group("hall"), "queue": count_group("queue")}
-        # Barista presence (only on 601 if present)
         if "barista" in names_lc:
             present = 1 if count_group("barista") > 0 else 0
             occ["barista"] = present
@@ -473,11 +493,10 @@ def process_camera(camera_id: str, config: dict):
                 }))
                 alert_sent = True
 
-        # publish live
         r.publish(DATA_CHANNEL, json.dumps({"timestamp": now, "camera_id": camera_id, "zone_counts": occ}))
         last_payload_counts = occ
 
-        # --- LOOP FPS & DEBUG OUTPUT ---
+        # DEBUG OUTPUT
         loop_rate.tick()
         if DEBUG and (now - last_debug_print) >= DEBUG_INTERVAL:
             last_debug_print = now
@@ -503,21 +522,17 @@ def process_camera(camera_id: str, config: dict):
                 }
                 r.publish(DEBUG_CH, json.dumps(dbg))
 
-        # --- OPTIONAL SNAPSHOTS ---
+        # OPTIONAL SNAPSHOTS
         if SNAPSHOT_EVERY_S > 0 and (now - last_snapshot) >= SNAPSHOT_EVERY_S:
             last_snapshot = now
             try:
                 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
                 snap = frame.copy()
-
-                # draw polygons
                 for zc in config["zones"]:
                     poly = np.array(zc["polygon"], np.int32)
                     cv2.polylines(snap, [poly], isClosed=True, color=(0, 165, 255), thickness=2)
                     M = poly.mean(axis=0).astype(int)
                     cv2.putText(snap, zc["name"], tuple(M), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
-
-                # draw stable tracks
                 if len(stable) > 0 and stable.tracker_id is not None:
                     for i in range(len(stable)):
                         x1, y1, x2, y2 = map(int, stable.xyxy[i])
@@ -526,8 +541,6 @@ def process_camera(camera_id: str, config: dict):
                         cv2.putText(snap, f"ID:{tid}", (x1, max(20, y1-8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60,180,75), 2)
                         cxcy = last_center.get(tid, ((x1+x2)//2, (y1+y2)//2))
                         cv2.circle(snap, (int(cxcy[0]), int(cxcy[1])), 3, (255, 255, 255), -1)
-
-                # overlay perf text
                 overlay = [
                     f"cap_fps: {cap.fps():.1f}",
                     f"infer: {(ema_infer_ms.v or 0.0):.1f} ms ({(1000.0/(ema_infer_ms.v or 1e9)):.1f} fps)",
@@ -541,7 +554,6 @@ def process_camera(camera_id: str, config: dict):
                     cv2.putText(snap, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20,20,20), 3)
                     cv2.putText(snap, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
                     y += 24
-
                 out_path = os.path.join(SNAPSHOT_DIR, f"{camera_id}_latest.jpg")
                 cv2.imwrite(out_path, snap)
             except Exception as e:
